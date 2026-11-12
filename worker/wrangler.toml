@@ -1,0 +1,12 @@
+name = "telegram-gdrive-bot"
+main = "index.js"
+compatibility_date = "2024-11-01"
+
+[vars]
+GITHUB_OWNER = "waguri-paglu"
+GITHUB_REPO = "telegram-gdrive-downloader"
+GITHUB_WORKFLOW = "mirror.yml"
+
+[[kv_namespaces]]
+binding = "SETTINGS_KV"
+id = "986025f566ad4cd996134e705723ff77"
