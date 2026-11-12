@@ -16,12 +16,12 @@ jobs:
         run: |
           sudo apt-get install -y -qq aria2 rclone >/dev/null
           mkdir -p /tmp/t && cd /tmp/t
-          aria2c -x16 -s16 --file-allocation=none --console-log-level=warn --summary-interval=0 https://speed.cloudflare.com/__down?bytes=2000000000 -o t.bin || true
+          aria2c -x16 -s16 --file-allocation=none --console-log-level=warn --summary-interval=0 https://ash-speed.hetzner.com/10GB.bin -o t.bin --max-download-limit=0 --stop=0 || true
           ls -la
       - name: Streaming copyurl to Drive (2GB)
         run: |
           mkdir -p ~/.config/rclone
           echo '${{ secrets.RCLONE_CONFIG }}' > ~/.config/rclone/rclone.conf
-          time rclone copyurl "https://speed.cloudflare.com/__down?bytes=2000000000" "gdrive:zz_probe/stream.bin" --drive-chunk-size 128M -P --stats-one-line || true
+          time timeout 120 rclone copyurl "https://ash-speed.hetzner.com/10GB.bin" "gdrive:zz_probe/stream.bin" --drive-chunk-size 128M -P --stats-one-line || true
           time rclone copy /tmp/t/t.bin gdrive:zz_probe/ --drive-chunk-size 128M --stats-one-line -P || true
           rclone purge gdrive:zz_probe || true
