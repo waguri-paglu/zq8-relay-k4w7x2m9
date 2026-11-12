@@ -312,25 +312,23 @@ async function openFolderBrowser(chatId, userId, folderId, editMsgId = null, ret
 // ============================================================================
 
 function buildTaskMenuMessage(task) {
-  const displayFileName = task.customName || task.detectedName || 'Unknown';
-  const sizeStr = task.fileSize > 0 ? fmtBytes(task.fileSize) : 'Unknown';
-
-  let modeLabel = 'Direct Mirror';
-  if (task.mode === 'extract') modeLabel = 'Extract Archive';
-  if (task.mode === 'zip') modeLabel = 'Create ZIP Archive';
-
-  const filterLine = task.selectFilter
-    ? `\n\nFilter  ·  <code>${escapeHtml(task.selectFilter)}</code>`
-    : '';
+  let extras = '';
+  if (task.customName) {
+    extras += `\n✓ <b>Rename:</b> <code>${escapeHtml(task.customName)}</code>`;
+  }
+  if (task.mode === 'extract') {
+    extras += `\n✓ <b>Mode:</b> Extract`;
+  } else if (task.mode === 'zip') {
+    extras += `\n✓ <b>Mode:</b> Create ZIP`;
+  }
+  if (task.selectFilter) {
+    extras += `\n✓ <b>Select:</b> <code>${escapeHtml(task.selectFilter)}</code>`;
+  }
 
   return (
-    `<blockquote><b>Target File</b>\n\n` +
-    `<code>${escapeHtml(displayFileName)}</code></blockquote>\n\n` +
-    `Size  ·  <code>${sizeStr}</code>\n\n` +
-    `Destination  ·  ${escapeHtml(task.folderName || 'My Drive')}\n\n` +
-    `Mode  ·  ${modeLabel}${filterLine}\n\n` +
-    `Timeout  ·  <code>2m 40s</code>\n\n` +
-    `<i>Adjust options below or start the transfer.</i>`
+    `📌 <b>Choose option for your task?</b>\n\n` +
+    `✓ <b>Custom Upload:</b> ${escapeHtml(task.folderName || 'My Drive')}${extras}\n\n` +
+    `⏰ <b>Timeout:</b> <code>2m40s</code>`
   );
 }
 
@@ -340,11 +338,11 @@ function buildTaskMenuKeyboard(task) {
   const zipLabel = task.mode === 'zip' ? '✓ Create ZIP' : 'Create ZIP';
   const renLabel = task.customName ? '✓ Rename' : 'Rename';
   const selLabel = task.selectFilter ? '✓ Select' : 'Select';
-  const folderShort = truncate(task.folderName || 'My Drive', 15);
+  const folderShort = truncate(task.folderName || 'My Drive', 14);
 
   return {
     inline_keyboard: [
-      [{ text: '▸  START MIRROR', callback_data: `tm_start:${tid}`, style: 'success' }],
+      [{ text: '▶️ START MIRROR', callback_data: `tm_start:${tid}`, style: 'success' }],
       [
         { text: renLabel, callback_data: `tm_ren:${tid}` },
         { text: `Upload: ${folderShort}`, callback_data: `tm_dir:${tid}` }
@@ -355,13 +353,13 @@ function buildTaskMenuKeyboard(task) {
       ],
       [
         { text: selLabel, callback_data: `tm_sel:${tid}` },
-        { text: 'Link Details', callback_data: `tm_info:${tid}` }
+        { text: 'File Info', callback_data: `tm_info:${tid}` }
       ],
       [
-        { text: '↩ Refresh', callback_data: `tm_back:${tid}`, style: 'primary' },
-        { text: 'Cancel', callback_data: `tm_cancel:${tid}`, style: 'danger' }
+        { text: '↩️ Back', callback_data: `tm_back:${tid}`, style: 'primary' },
+        { text: '⛔ Cancel', callback_data: `tm_cancel:${tid}`, style: 'danger' }
       ],
-      [{ text: 'Disable ButtonMode', callback_data: `tm_nobtn:${tid}`, style: 'danger' }]
+      [{ text: '🚫 Disable ButtonMode', callback_data: `tm_nobtn:${tid}`, style: 'danger' }]
     ]
   };
 }
@@ -941,27 +939,33 @@ async function launchMirrorTask(task, env) {
 
   const modeTag = task.mode === 'extract' ? '#Extract' : task.mode === 'zip' ? '#ArchiveZIP' : '#Mirror';
   const freeDriveStr = quota && quota.free !== Infinity ? fmtBytes(quota.free) : 'Unlimited';
+  const actionsUrl = `https://github.com/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/actions`;
 
   const bootText =
     `${fallbackNotice}` +
-    `<blockquote><b>Transferring File</b>\n\n` +
-    `<code>${escapeHtml(task.customName || task.detectedName)}</code></blockquote>\n\n` +
-    `Status  ·  Initializing Runner  <code>0.00%</code>\n\n` +
-    `<code>[□□□□□□□□□□□□]</code>\n\n` +
-    `Size  ·  <code>${fileSize > 0 ? fmtBytes(fileSize) : 'Unknown'}</code>\n\n` +
-    `Folder  ·  ${escapeHtml(task.folderName)}  ·  Free  ·  <code>${freeDriveStr}</code>\n\n` +
-    `User  ·  @${escapeHtml(task.username)}  <code>${userId}</code>\n\n` +
-    `Mode  ·  ${modeTag}  ·  /cancel_${taskId}\n\n` +
-    `<pre><code class="language-SYSTEM">SYSTEM MONITOR\n\n` +
-    `Allocating dedicated cloud node (~10s)...</code></pre>`;
+    `<blockquote>📄 <b>Name :</b> <code>${escapeHtml(task.customName || task.detectedName)}</code></blockquote>\n\n` +
+    `┌ Status : <a href="${actionsUrl}">Booting..</a> (0.00%)\n` +
+    `├ [<code>□□□□□□□□□□□□</code>]\n` +
+    `├ By : @${escapeHtml(task.username)}\n` +
+    `├ UserID : <code>[${userId}]</code>\n` +
+    `├ Size : <code>${fileSize > 0 ? fmtBytes(fileSize) : 'Unknown'}</code>\n` +
+    `├ Folder : ${escapeHtml(task.folderName)}\n` +
+    `├ Drive Free : <code>${freeDriveStr}</code>\n` +
+    `├ Mode : <code>${modeTag}</code>\n` +
+    `└ ⛔ /cancel_${taskId}\n\n` +
+    `____________________________\n\n` +
+    `<pre><code>┌ SYSTEM\n` +
+    `├ 🟢 Cpu [□□□□□□□□□□] 0.0%\n` +
+    `├ 🟢 Ram [□□□□□□□□□□] 0.0%\n` +
+    `├ 🟢 Free [■□□□□□□□□□] 115.00GB\n` +
+    `└ 🕒 Allocating runner (~10s)..</code></pre>`;
 
   await editMessage(chatId, menuMsgId, bootText, env, {
     inline_keyboard: [
       [
-        { text: 'Refresh', callback_data: `st_ref:${taskId}`, style: 'primary' },
-        { text: 'Close', callback_data: `st_close:${taskId}`, style: 'danger' }
-      ],
-      [{ text: 'Cancel Task', callback_data: `st_cancel:${taskId}`, style: 'danger' }]
+        { text: '🔄 Refresh', callback_data: `st_ref:${taskId}`, style: 'primary' },
+        { text: '🔽 Close', callback_data: `st_close:${taskId}`, style: 'danger' }
+      ]
     ]
   });
 

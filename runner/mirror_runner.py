@@ -110,16 +110,26 @@ def fmt_bytes(num: float) -> str:
     return f"{num:.2f} PiB"
 
 
+def fmt_sys_bytes(num: float) -> str:
+    if num <= 0:
+        return "0.00B"
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if abs(num) < 1024.0:
+            return f"{num:.2f}{unit}"
+        num /= 1024.0
+    return f"{num:.2f}PB"
+
+
 def fmt_duration(seconds: float) -> str:
     if seconds is None or seconds < 0 or seconds > 86400 * 7:
-        return "—"
+        return "-"
     seconds = int(seconds)
     h, rem = divmod(seconds, 3600)
     m, s = divmod(rem, 60)
     if h > 0:
-        return f"{h}h {m:02d}m {s:02d}s"
+        return f"{h}h{m}m{s}s"
     if m > 0:
-        return f"{m}m {s:02d}s"
+        return f"{m}m{s}s"
     return f"{s}s"
 
 
@@ -202,12 +212,20 @@ class SystemMonitor:
             "ram_pct": ram_pct,
             "free_gb": free_gb,
             "disk_pct": disk_used_pct,
-            "rx_spd": fmt_bytes(rx_spd) + "/s",
-            "tx_spd": fmt_bytes(tx_spd) + "/s",
-            "rx_tot": fmt_bytes(max(0, rx2 - self.base_rx)),
-            "tx_tot": fmt_bytes(max(0, tx2 - self.base_tx)),
+            "rx_spd": fmt_sys_bytes(rx_spd) + "/s",
+            "tx_spd": fmt_sys_bytes(tx_spd) + "/s",
+            "rx_tot": fmt_sys_bytes(max(0, rx2 - self.base_rx)),
+            "tx_tot": fmt_sys_bytes(max(0, tx2 - self.base_tx)),
             "uptime": fmt_duration(now - self.start_time),
         }
+
+
+def dot_for(pct: float) -> str:
+    if pct >= 85:
+        return "🔴"
+    if pct >= 60:
+        return "🟠"
+    return "🟢"
 
 
 def build_status_card(
@@ -238,46 +256,52 @@ def build_status_card(
 
     total_str = fmt_bytes(total_bytes) if total_bytes > 0 else "Unknown"
     done_str = fmt_bytes(done_bytes)
+    run_url = (
+        f"https://github.com/waguri-paglu/zq8-relay-k4w7x2m9/actions/runs/{GITHUB_RUN_ID}"
+        if GITHUB_RUN_ID
+        else "https://github.com/waguri-paglu/zq8-relay-k4w7x2m9/actions"
+    )
 
     sys_block = (
-        f"SYSTEM MONITOR\n\n"
-        f"CPU    [{cpu_bar}]  {sys_snap['cpu_pct']:5.1f}%\n"
-        f"RAM    [{ram_bar}]  {sys_snap['ram_pct']:5.1f}%\n"
-        f"DISK   [{disk_bar}]  {sys_snap['free_gb']:5.1f} GiB free\n\n"
-        f"SPD    ↓ {sys_snap['rx_spd']:<13} ↑ {sys_snap['tx_spd']}\n"
-        f"NET    ↓ {sys_snap['rx_tot']:<13} ↑ {sys_snap['tx_tot']}\n"
-        f"UPT    {sys_snap['uptime']}"
+        f"┌ SYSTEM\n"
+        f"├ {dot_for(sys_snap['cpu_pct'])} Cpu [{cpu_bar}] {sys_snap['cpu_pct']:.1f}%\n"
+        f"├ {dot_for(sys_snap['ram_pct'])} Ram [{ram_bar}] {sys_snap['ram_pct']:.1f}%\n"
+        f"├ {dot_for(sys_snap['disk_pct'])} Free [{disk_bar}] {sys_snap['free_gb']:.2f}GB\n"
+        f"├ ⚡ Spd ↓ {sys_snap['rx_spd']} ↑ {sys_snap['tx_spd']}\n"
+        f"├ 🌐 Net ↓ {sys_snap['rx_tot']} ↑ {sys_snap['tx_tot']}\n"
+        f"└ 🕒 Upt {sys_snap['uptime']}"
     )
 
     lines = [
-        f"<blockquote><b>Transferring File</b>\n\n<code>{html.escape(filename)}</code></blockquote>",
+        f"<blockquote>📄 <b>Name :</b> <code>{html.escape(filename)}</code></blockquote>",
         "",
-        f"Status  ·  {html.escape(status_text)}  <code>{pct:.2f}%</code>",
-        f"<code>[{bar}]</code>",
+        f"┌ Status : <a href=\"{run_url}\">{html.escape(status_text)}</a> ({pct:.2f}%)",
+        f"├ [<code>{bar}</code>]",
+        f"├ By : {html.escape(uname)}",
+        f"├ UserID : <code>[{html.escape(str(uid))}]</code>",
+        f"├ Elapsed : <code>{fmt_duration(elapsed_sec)}</code>",
+        f"├ Size : <code>{total_str}</code>",
+        f"├ Processed : <code>{done_str}</code>",
+        f"├ ETA : <code>{fmt_duration(eta_sec)}</code>",
+        f"├ Speed : <code>{fmt_bytes(speed_bps)}/s</code>",
+        f"├ Engine : <code>{html.escape(engine)}</code>",
+        f"├ Mode : <code>#{mode_str}</code>",
+        f"└ ⛔ /cancel_{html.escape(short_id)}",
         "",
-        f"Speed  ·  <code>{fmt_bytes(speed_bps)}/s</code>",
-        f"Progress  ·  <code>{done_str} / {total_str}</code>",
-        f"ETA  ·  <code>{fmt_duration(eta_sec)}</code>  <i>({fmt_duration(elapsed_sec)} elapsed)</i>",
+        "____________________________",
         "",
-        f"User  ·  {html.escape(uname)}  <code>{html.escape(str(uid))}</code>",
-        f"Engine  ·  {html.escape(engine)}  ·  #{mode_str}",
-        f"Stop  ·  /cancel_{html.escape(short_id)}",
-        "",
-        f"<pre><code class=\"language-SYSTEM\">{html.escape(sys_block)}</code></pre>",
+        f"<pre><code>{html.escape(sys_block)}</code></pre>",
     ]
-    return "\n\n".join(line if line != "" else "" for line in lines).replace("\n\n\n\n", "\n\n").replace("\n\n\n", "\n\n")
+    return "\n".join(lines)
 
 
 def status_keyboard(job_id: str) -> dict:
     return {
         "inline_keyboard": [
             [
-                {"text": "Refresh", "callback_data": f"st_ref:{job_id}", "style": "primary"},
-                {"text": "Close", "callback_data": f"st_close:{job_id}", "style": "danger"},
-            ],
-            [
-                {"text": "Cancel Task", "callback_data": f"st_cancel:{job_id}", "style": "danger"},
-            ],
+                {"text": "🔄 Refresh", "callback_data": f"st_ref:{job_id}", "style": "primary"},
+                {"text": "🔽 Close", "callback_data": f"st_close:{job_id}", "style": "danger"},
+            ]
         ]
     }
 
@@ -460,13 +484,13 @@ def main():
                 card = build_status_card(
                     job=job,
                     filename=cur_filename,
-                    status_text="Downloading",
+                    status_text="Download..",
                     pct=pct,
                     done_bytes=done_len,
                     total_bytes=total_len,
                     speed_bps=dl_spd,
                     eta_sec=eta,
-                    engine="Aria2c v1.37",
+                    engine="Aria2c v1.37.0",
                     elapsed_sec=now - task_start,
                     sys_snap=snap,
                 )
@@ -650,7 +674,7 @@ def main():
                 card = build_status_card(
                     job=job,
                     filename=cur_filename,
-                    status_text="Uploading",
+                    status_text="Uploading..",
                     pct=up_pct,
                     done_bytes=up_done,
                     total_bytes=up_total,
