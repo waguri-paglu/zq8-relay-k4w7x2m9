@@ -1,29 +1,24 @@
 /**
  * Cloudflare Worker for Multi-User Telegram to Google Drive Mirror Bot
- * Features:
- * - Per-user Google Drive OAuth2 login (/login, /logout, /oauth/callback)
- * - Interactive Google Drive Folder Browser (/setdldir) with Up, Select, New Folder & Pagination
- * - Full Task Options Menu (Start Mirror, Rename, Upload Folder, Extract, Create ZIP, Select, Cancel, ButtonMode)
- * - Pre-flight Google Drive quota & runner workspace verification with smart fallback
- * - Secure job handoff to GitHub Actions (public-repo safe: only job_id passed in workflow_dispatch)
- * - Task status & cancellation via GitHub Actions API (/tasks, /cancel_<id>)
+ * Refined UI Edition:
+ * - Custom Unicode Sans-Serif & Small-Caps typography
+ * - Native Telegram <blockquote> cards and <pre><code> aligned telemetry blocks
+ * - Colored InlineKeyboardButtons (style: "success" | "primary" | "danger")
+ * - Clean, breathable layout with minimal emoji usage
  */
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // 1. Google OAuth2 Callback
     if (request.method === 'GET' && url.pathname === '/oauth/callback') {
       return await handleOAuthCallback(url, env);
     }
 
-    // 2. Internal Runner Endpoints (authenticated by JOB_SECRET)
     if (request.method === 'POST' && url.pathname.startsWith('/internal/')) {
       return await handleInternalRunner(request, url.pathname, env);
     }
 
-    // 3. Telegram Webhook
     if (request.method !== 'POST') {
       return new Response('Mirror Bot Webhook Active.', { status: 200 });
     }
@@ -38,6 +33,34 @@ export default {
     }
   }
 };
+
+// ============================================================================
+// CUSTOM TYPOGRAPHY HELPERS (Mathematical Sans-Serif Bold & Regular)
+// ============================================================================
+
+const SANS_BOLD_MAP = {
+  A:'𝗔',B:'𝗕',C:'𝗖',D:'𝗗',E:'𝗘',F:'𝗙',G:'𝗚',H:'𝗛',I:'𝗜',J:'𝗝',K:'𝗞',L:'𝗟',M:'𝗠',
+  N:'𝗡',O:'𝗢',P:'𝗣',Q:'𝗤',R:'𝗥',S:'𝗦',T:'𝗧',U:'𝗨',V:'𝗩',W:'𝗪',X:'𝗫',Y:'𝗬',Z:'𝗭',
+  a:'𝗮',b:'𝗯',c:'𝗰',d:'𝗱',e:'𝗲',f:'𝗳',g:'𝗴',h:'𝗵',i:'𝗶',j:'𝗷',k:'𝗸',l:'𝗹',m:'𝗺',
+  n:'𝗻',o:'𝗼',p:'𝗽',q:'𝗾',r:'𝗿',s:'𝘀',t:'𝘁',u:'𝘂',v:'𝘃',w:'𝘄',x:'𝘅',y:'𝘆',z:'𝘇',
+  '0':'𝟬','1':'𝟭','2':'𝟮','3':'𝟯','4':'𝟰','5':'𝟱','6':'𝟲','7':'𝟳','8':'𝟴','9':'𝟵'
+};
+
+const SANS_REG_MAP = {
+  A:'𝖠',B:'𝖡',C:'𝖢',D:'𝖣',E:'𝖤',F:'𝖥',G:'𝖦',H:'𝖧',I:'𝖨',J:'𝖩',K:'𝖪',L:'𝖫',M:'𝖬',
+  N:'𝖭',O:'𝖮',P:'𝖯',Q:'𝖰',R:'𝖱',S:'𝖲',T:'𝖳',U:'𝖴',V:'𝖵',W:'𝖶',X:'𝖷',Y:'𝖸',Z:'𝖹',
+  a:'𝖺',b:'𝖻',c:'𝖼',d:'𝖽',e:'𝖾',f:'𝖿',g:'𝗀',h:'𝗁',i:'𝗂',j:'𝗃',k:'𝗄',l:'𝗅',m:'𝗆',
+  n:'𝗇',o:'𝗈',p:'𝗉',q:'𝗊',r:'𝗋',s:'𝗌',t:'𝗍',u:'𝗎',v:'𝗏',w:'𝗐',x:'𝗑',y:'𝗒',z:'𝗓',
+  '0':'𝟢','1':'𝟣','2':'𝟤','3':'𝟥','4':'𝟦','5':'𝟧','6':'𝟨','7':'𝟩','8':'𝟪','9':'𝟫'
+};
+
+function sb(text) {
+  return String(text).split('').map(c => SANS_BOLD_MAP[c] || c).join('');
+}
+
+function sr(text) {
+  return String(text).split('').map(c => SANS_REG_MAP[c] || c).join('');
+}
 
 // ============================================================================
 // GOOGLE OAUTH2 & DRIVE API HELPERS
@@ -75,7 +98,7 @@ async function handleOAuthCallback(url, env) {
   const error = url.searchParams.get('error');
 
   if (error) {
-    return htmlResponse('Login Cancelled', `Google returned an error: ${escapeHtml(error)}. You can close this tab.`);
+    return htmlResponse('Authorization Cancelled', `Google returned: ${escapeHtml(error)}. You can close this window.`);
   }
   if (!code || !state) {
     return htmlResponse('Invalid Request', 'Missing OAuth code or state parameter.');
@@ -83,7 +106,7 @@ async function handleOAuthCallback(url, env) {
 
   const stateRaw = await env.SETTINGS_KV.get(`oauth_state:${state}`);
   if (!stateRaw) {
-    return htmlResponse('Session Expired', 'This login link has expired. Please run /login again in Telegram.');
+    return htmlResponse('Session Expired', 'This authorization link has expired. Run /login again in Telegram.');
   }
   await env.SETTINGS_KV.delete(`oauth_state:${state}`);
   const stateData = JSON.parse(stateRaw);
@@ -103,13 +126,12 @@ async function handleOAuthCallback(url, env) {
 
   const tokenData = await tokenRes.json();
   if (!tokenRes.ok || !tokenData.access_token) {
-    return htmlResponse('Login Failed', `Could not exchange authorization code. Please try /login again.`);
+    return htmlResponse('Authorization Failed', 'Could not exchange authorization code. Please try /login again.');
   }
 
   const accessToken = tokenData.access_token;
   const refreshToken = tokenData.refresh_token;
 
-  // Fetch user's email & Drive info
   let email = 'Connected Account';
   const aboutRes = await fetch('https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,displayName),storageQuota', {
     headers: { Authorization: `Bearer ${accessToken}` }
@@ -119,7 +141,6 @@ async function handleOAuthCallback(url, env) {
     email = aboutData?.user?.emailAddress || aboutData?.user?.displayName || email;
   }
 
-  // Load any existing user profile so we keep refresh_token if Google didn't re-send one
   const existing = await getUserProfile(stateData.userId, env);
   const finalRefresh = refreshToken || existing?.refreshToken;
 
@@ -138,17 +159,17 @@ async function handleOAuthCallback(url, env) {
 
   await saveUserProfile(stateData.userId, userProfile, env);
 
-  // Immediately prompt user in Telegram to select a folder
   await sendMessage(
     stateData.chatId,
-    `✅ <b>Google Drive Connected!</b>\n👤 <b>Account:</b> <code>${escapeHtml(email)}</code>\n\n📂 <b>Select your download folder below:</b>`,
+    `<blockquote><b>${sb('DRIVE CONNECTED')}</b>\n<code>${escapeHtml(email)}</code></blockquote>\n\n` +
+      `${sr('Select your default upload directory below:')}`,
     env
   );
   await openFolderBrowser(stateData.chatId, stateData.userId, 'root', null, null, env);
 
   return htmlResponse(
-    'Google Drive Connected!',
-    `Successfully linked <b>${escapeHtml(email)}</b>.<br><br>Return to Telegram to choose your target download folder.`
+    'Google Drive Linked',
+    `Connected as <b>${escapeHtml(email)}</b>.<br><br>Return to Telegram to choose your target folder.`
   );
 }
 
@@ -188,7 +209,7 @@ async function getDriveQuota(accessToken) {
   if (!res.ok) return null;
   const data = await res.json();
   const q = data.storageQuota || {};
-  const limit = q.limit ? parseInt(q.limit, 10) : null; // null means unlimited (Workspace/Enterprise)
+  const limit = q.limit ? parseInt(q.limit, 10) : null;
   const usage = q.usage ? parseInt(q.usage, 10) : 0;
   const free = limit !== null ? Math.max(0, limit - usage) : Infinity;
   return { limit, usage, free, email: data?.user?.emailAddress };
@@ -210,7 +231,7 @@ async function saveUserProfile(userId, profile, env) {
 async function openFolderBrowser(chatId, userId, folderId, editMsgId = null, returnTaskId = null, env, page = 0) {
   const accessToken = await getValidAccessToken(userId, env);
   if (!accessToken) {
-    await sendMessage(chatId, `🔑 Please connect your Google Drive first using /login.`, env);
+    await sendMessage(chatId, `${sr('Please connect your Google Drive first using')} /login.`, env);
     return;
   }
 
@@ -230,7 +251,6 @@ async function openFolderBrowser(chatId, userId, folderId, editMsgId = null, ret
     }
   }
 
-  // Query folders and files inside targetId in My Drive
   const q = `'${targetId}' in parents and trashed = false`;
   const listParams = new URLSearchParams({
     q,
@@ -257,7 +277,6 @@ async function openFolderBrowser(chatId, userId, folderId, editMsgId = null, ret
   const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
   const safePage = Math.max(0, Math.min(page, totalPages - 1));
 
-  // Save browser state in KV so callback_data stays tiny (<64 bytes)
   const browserState = {
     currentId: targetId,
     currentName: folderName,
@@ -274,44 +293,42 @@ async function openFolderBrowser(chatId, userId, folderId, editMsgId = null, ret
   for (let i = 0; i < pageItems.length; i++) {
     const idx = safePage * pageSize + i;
     const item = pageItems[i];
-    const icon = item.isFolder ? '📁' : '📄';
-    const label = `${icon} ${truncate(item.name, 34)}`;
+    const prefix = item.isFolder ? '▸ ' : '• ';
+    const label = `${prefix}${truncate(item.name, 34)}`;
     rows.push([{ text: label, callback_data: item.isFolder ? `fb_open:${idx}` : `fb_file:${idx}` }]);
   }
 
-  // Pagination Row
   if (totalPages > 1) {
     const navRow = [];
-    if (safePage > 0) navRow.push({ text: '⬅️ Prev', callback_data: `fb_page:${safePage - 1}` });
-    navRow.push({ text: `📄 ${safePage + 1}/${totalPages}`, callback_data: 'fb_noop' });
-    if (safePage < totalPages - 1) navRow.push({ text: 'Next ➡️', callback_data: `fb_page:${safePage + 1}` });
+    if (safePage > 0) navRow.push({ text: '‹ Prev', callback_data: `fb_page:${safePage - 1}`, style: 'primary' });
+    navRow.push({ text: `${safePage + 1} / ${totalPages}`, callback_data: 'fb_noop' });
+    if (safePage < totalPages - 1) navRow.push({ text: 'Next ›', callback_data: `fb_page:${safePage + 1}`, style: 'primary' });
     rows.push(navRow);
   }
 
-  // Up Row
   if (targetId !== 'root') {
-    rows.push([{ text: '⬆️ Go Up One Level', callback_data: 'fb_up' }]);
+    rows.push([{ text: '↑ Parent Directory', callback_data: 'fb_up', style: 'primary' }]);
   }
 
-  // Bottom Actions: Select Folder & Create New Folder
   rows.push([
-    { text: '✅ Select This Folder', callback_data: 'fb_sel' },
-    { text: '➕ Create New Folder', callback_data: 'fb_mkdir' }
+    { text: '✓ Select Folder', callback_data: 'fb_sel', style: 'success' },
+    { text: '+ New Folder', callback_data: 'fb_mkdir', style: 'primary' }
   ]);
 
   if (returnTaskId) {
-    rows.push([{ text: '↩️ Back to Task Menu', callback_data: `fb_back:${returnTaskId}` }]);
+    rows.push([{ text: '↩ Back to Task', callback_data: `fb_back:${returnTaskId}`, style: 'primary' }]);
   } else {
-    rows.push([{ text: '✖️ Close', callback_data: 'fb_close' }]);
+    rows.push([{ text: 'Close', callback_data: 'fb_close', style: 'danger' }]);
   }
 
   const folderCount = items.filter(x => x.isFolder).length;
   const fileCount = items.length - folderCount;
   const headerText =
-    `📂 <b>Google Drive Folder Browser</b>\n\n` +
-    `📍 <b>Current Folder:</b> <code>${escapeHtml(folderName)}</code>\n` +
-    `📊 <b>Contents:</b> ${folderCount} folders, ${fileCount} files\n\n` +
-    `<i>Tap a folder to open it, or click <b>Select This Folder</b> below:</i>`;
+    `<blockquote><b>${sb('DIRECTORY BROWSER')}</b>\n` +
+    `<code>${escapeHtml(folderName)}</code></blockquote>\n\n` +
+    `┌ <b>${ sb('Folders') }</b>   <code>${folderCount}</code>\n` +
+    `└ <b>${ sb('Files') }</b>     <code>${fileCount}</code>\n\n` +
+    `<i>${sr('Open a subfolder below or confirm this location.')}</i>`;
 
   const markup = { inline_keyboard: rows };
   if (editMsgId) {
@@ -322,59 +339,60 @@ async function openFolderBrowser(chatId, userId, folderId, editMsgId = null, ret
 }
 
 // ============================================================================
-// TASK OPTIONS MENU (Image 1 Reference Flow)
+// TASK OPTIONS MENU (Refined, Spacious Design)
 // ============================================================================
 
 function buildTaskMenuMessage(task) {
-  const uname = task.username ? task.username.toUpperCase() : 'USER';
-  const shortUrl = truncate(task.fileUrl, 48);
   const displayFileName = task.customName || task.detectedName || 'Unknown';
-  const sizeStr = task.fileSize > 0 ? fmtBytes(task.fileSize) : 'Unknown size';
+  const sizeStr = task.fileSize > 0 ? fmtBytes(task.fileSize) : 'Unknown';
 
-  let modeLabel = 'Normal (Direct Mirror)';
-  if (task.mode === 'extract') modeLabel = '📂 Extract Archive';
-  if (task.mode === 'zip') modeLabel = '🗜️ Create ZIP Archive';
+  let modeLabel = 'Direct Mirror';
+  if (task.mode === 'extract') modeLabel = 'Extract Archive';
+  if (task.mode === 'zip') modeLabel = 'Create ZIP Archive';
 
-  const filterLine = task.selectFilter ? `\n🔍 <b>Select Filter:</b> <code>${escapeHtml(task.selectFilter)}</code>` : '';
+  const filterLine = task.selectFilter
+    ? `\n├ <b>${sb('Filter')}</b>       <code>${escapeHtml(task.selectFilter)}</code>`
+    : '';
 
   return (
-    `【 <b>${escapeHtml(uname)}</b> 】\n` +
-    `<code>/m ${escapeHtml(shortUrl)}</code>\n\n` +
-    `📌 <b>Choose option for your task?</b>\n\n` +
-    `✓ <b>Custom Upload:</b> <code>${escapeHtml(task.folderName || 'My Drive')}</code>\n` +
-    `📄 <b>File Name:</b> <code>${escapeHtml(displayFileName)}</code>\n` +
-    `📊 <b>File Size:</b> <code>${sizeStr}</code>\n` +
-    `⚙️ <b>Mode:</b> ${modeLabel}${filterLine}\n\n` +
-    `⏰ <b>Timeout:</b> 2m40s`
+    `<blockquote><b>${sb('TARGET FILE')}</b>\n` +
+    `<code>${escapeHtml(displayFileName)}</code></blockquote>\n\n` +
+    `┌ <b>${sb('Size')}</b>         <code>${sizeStr}</code>\n` +
+    `├ <b>${sb('Upload')}</b>       <code>${escapeHtml(task.folderName || 'My Drive')}</code>\n` +
+    `├ <b>${sb('Mode')}</b>         <code>${modeLabel}</code>${filterLine}\n` +
+    `└ <b>${sb('Timeout')}</b>      <code>2m 40s</code>\n\n` +
+    `<i>${sr('Configure task parameters below or press Start Mirror.')}</i>`
   );
 }
 
 function buildTaskMenuKeyboard(task) {
   const tid = task.taskId;
-  const extPrefix = task.mode === 'extract' ? '✓ ' : '';
-  const zipPrefix = task.mode === 'zip' ? '✓ ' : '';
-  const folderShort = truncate(task.folderName || 'My Drive', 16);
+  const extLabel = task.mode === 'extract' ? '✓ Extract' : 'Extract';
+  const zipLabel = task.mode === 'zip' ? '✓ Create ZIP' : 'Create ZIP';
+  const renLabel = task.customName ? '✓ Rename' : 'Rename';
+  const selLabel = task.selectFilter ? '✓ Select' : 'Select';
+  const folderShort = truncate(task.folderName || 'My Drive', 15);
 
   return {
     inline_keyboard: [
-      [{ text: '▶️ START MIRROR', callback_data: `tm_start:${tid}` }],
+      [{ text: '▸  START MIRROR', callback_data: `tm_start:${tid}`, style: 'success' }],
       [
-        { text: task.customName ? '✓ Rename' : 'Rename', callback_data: `tm_ren:${tid}` },
+        { text: renLabel, callback_data: `tm_ren:${tid}` },
         { text: `Upload: ${folderShort}`, callback_data: `tm_dir:${tid}` }
       ],
       [
-        { text: `${extPrefix}Extract`, callback_data: `tm_ext:${tid}` },
-        { text: `${zipPrefix}Create ZIP`, callback_data: `tm_zip:${tid}` }
+        { text: extLabel, callback_data: `tm_ext:${tid}` },
+        { text: zipLabel, callback_data: `tm_zip:${tid}` }
       ],
       [
-        { text: task.selectFilter ? '✓ Select' : 'Select', callback_data: `tm_sel:${tid}` },
-        { text: 'File Info', callback_data: `tm_info:${tid}` }
+        { text: selLabel, callback_data: `tm_sel:${tid}` },
+        { text: 'Link Details', callback_data: `tm_info:${tid}` }
       ],
       [
-        { text: '↩️ Back', callback_data: `tm_back:${tid}` },
-        { text: '⛔ Cancel', callback_data: `tm_cancel:${tid}` }
+        { text: '↩ Refresh', callback_data: `tm_back:${tid}`, style: 'primary' },
+        { text: 'Cancel', callback_data: `tm_cancel:${tid}`, style: 'danger' }
       ],
-      [{ text: '🚫 Disable ButtonMode', callback_data: `tm_nobtn:${tid}` }]
+      [{ text: 'Disable ButtonMode', callback_data: `tm_nobtn:${tid}`, style: 'danger' }]
     ]
   };
 }
@@ -397,12 +415,11 @@ async function handleTelegramUpdate(update, env) {
   const username = msg.from.username || msg.from.first_name || 'User';
   const text = msg.text.trim();
 
-  // Check if user is in an interactive text prompt state (Rename, New Folder, Select Filter)
   const promptRaw = await env.SETTINGS_KV.get(`prompt:${userId}`);
   if (promptRaw) {
     if (text === '/cancel') {
       await env.SETTINGS_KV.delete(`prompt:${userId}`);
-      await sendMessage(chatId, `✖️ Input cancelled.`, env);
+      await sendMessage(chatId, `<i>${sr('Input cancelled.')}</i>`, env);
       return;
     }
     const promptState = JSON.parse(promptRaw);
@@ -411,43 +428,39 @@ async function handleTelegramUpdate(update, env) {
     return;
   }
 
-  // Command: /start or /help
   if (text === '/start' || text.startsWith('/start ') || text === '/help') {
     await sendStartScreen(chatId, userId, username, env);
     return;
   }
 
-  // Command: /login
   if (text === '/login') {
     const authUrl = await createOAuthUrl(chatId, userId, username, env);
     await sendMessage(
       chatId,
-      `🔑 <b>Connect Your Google Drive</b>\n\n` +
-        `Click the button below to sign in with Google and grant Drive access.\n` +
-        `<i>Note: If Google shows an "unverified app" screen, tap <b>Advanced → Go to Mirror Bot (unsafe)</b> to proceed.</i>`,
+      `<blockquote><b>${sb('GOOGLE DRIVE AUTHENTICATION')}</b></blockquote>\n\n` +
+        `${sr('Authorize your Google Drive account so transfers upload directly to your storage.')}\n\n` +
+        `<i>${sr('If Google displays an unverified app prompt, select Advanced → Proceed.')}</i>`,
       env,
-      { inline_keyboard: [[{ text: '🔑 Connect Google Drive', url: authUrl }]] }
+      { inline_keyboard: [[{ text: '▸  Connect Google Drive', url: authUrl, style: 'primary' }]] }
     );
     return;
   }
 
-  // Command: /logout
   if (text === '/logout') {
     await env.SETTINGS_KV.delete(`user:${userId}`);
-    await sendMessage(chatId, `🚪 <b>Logged out.</b> Your Google Drive credentials have been removed.`, env);
+    await sendMessage(chatId, `<blockquote><b>${sb('DISCONNECTED')}</b>\n${sr('Your Google Drive credentials have been removed.')}</blockquote>`, env);
     return;
   }
 
-  // Command: /setdldir
   if (text === '/setdldir' || text === '/setfolder') {
     const profile = await getUserProfile(userId, env);
     if (!profile || !profile.refreshToken) {
       const authUrl = await createOAuthUrl(chatId, userId, username, env);
       await sendMessage(
         chatId,
-        `⚠️ You must connect your Google Drive first before selecting a download folder.`,
+        `${sr('Connect your Google Drive first before choosing a destination folder.')}`,
         env,
-        { inline_keyboard: [[{ text: '🔑 Connect Google Drive', url: authUrl }]] }
+        { inline_keyboard: [[{ text: '▸  Connect Google Drive', url: authUrl, style: 'primary' }]] }
       );
       return;
     }
@@ -455,63 +468,65 @@ async function handleTelegramUpdate(update, env) {
     return;
   }
 
-  // Command: /settings
   if (text === '/settings') {
     const profile = await getUserProfile(userId, env);
     if (!profile) {
-      await sendMessage(chatId, `Please /login first to configure settings.`, env);
+      await sendMessage(chatId, `${sr('Please run')} /login ${sr('first.')}`, env);
       return;
     }
     await sendSettingsMenu(chatId, userId, profile, null, env);
     return;
   }
 
-  // Command: /tasks or /status
   if (text === '/tasks' || text === '/status') {
     await sendActiveTasks(chatId, userId, env);
     return;
   }
 
-  // Command: /cancel_<jobId>
   if (text.startsWith('/cancel_')) {
     const jobId = text.replace('/cancel_', '').split('@')[0].trim();
     await cancelActiveJob(chatId, jobId, env);
     return;
   }
 
-  // Detect mirror command (/m <url>, /mirror <url>) or direct URL
   const urlMatch = text.match(/https?:\/\/[^\s]+/i);
   if (!urlMatch) {
     if (text.startsWith('/m')) {
-      await sendMessage(chatId, `⚠️ <b>Usage:</b> <code>/m https://example.com/file.mkv</code>`, env);
+      await sendMessage(chatId, `<b>${sb('Usage:')}</b>  <code>/m https://example.com/file.mkv</code>`, env);
     }
     return;
   }
 
   const fileUrl = urlMatch[0];
 
-  // Require user to be logged in to their Google Drive
   const profile = await getUserProfile(userId, env);
   if (!profile || !profile.refreshToken) {
     const authUrl = await createOAuthUrl(chatId, userId, username, env);
     await sendMessage(
       chatId,
-      `🔒 <b>Authentication Required</b>\n\nPlease connect your Google Drive account first so files can be mirrored directly to your Drive:`,
+      `<blockquote><b>${sb('AUTHENTICATION REQUIRED')}</b></blockquote>\n\n` +
+        `${sr('Connect your Google Drive account to start mirroring files:')}`,
       env,
-      { inline_keyboard: [[{ text: '🔑 Connect Google Drive', url: authUrl }]] }
+      { inline_keyboard: [[{ text: '▸  Connect Google Drive', url: authUrl, style: 'primary' }]] }
     );
     return;
   }
 
-  const checkingMsg = await sendMessage(chatId, `🔍 <b>Inspecting link...</b>`, env, null, msg.message_id);
+  const checkingMsg = await sendMessage(
+    chatId,
+    `<blockquote><b>${sb('INSPECTING LINK')}</b>\n<i>${sr('Verifying stream headers & size...')}</i></blockquote>`,
+    env,
+    null,
+    msg.message_id
+  );
   const checkingMsgId = checkingMsg?.result?.message_id;
 
   const verification = await verifyDirectLink(fileUrl);
   if (!verification.valid) {
     const errText =
-      `❌ <b>Invalid Download Link</b>\n` +
-      `⚠️ <b>Reason:</b> ${escapeHtml(verification.reason)}\n\n` +
-      `<i>Please send a direct downloadable link, not an HTML webpage.</i>`;
+      `<blockquote><b>${sb('INVALID STREAM LINK')}</b></blockquote>\n\n` +
+      `┌ <b>${sb('Reason')}</b>   <code>${escapeHtml(verification.reason)}</code>\n` +
+      `└ <b>${sb('Action')}</b>   ${sr('Provide a direct file download URL.')}`;
     if (checkingMsgId) {
       await editMessage(chatId, checkingMsgId, errText, env);
     } else {
@@ -543,7 +558,6 @@ async function handleTelegramUpdate(update, env) {
 
   await env.SETTINGS_KV.put(`task:${taskId}`, JSON.stringify(task), { expirationTtl: 7200 });
 
-  // If user disabled ButtonMode, launch mirror immediately
   if (profile.buttonMode === false) {
     await launchMirrorTask(task, env);
     return;
@@ -562,14 +576,14 @@ async function handleTelegramUpdate(update, env) {
 }
 
 // ============================================================================
-// HANDLE INTERACTIVE PROMPTS (Rename, Create Folder, Select Filter)
+// HANDLE INTERACTIVE PROMPTS
 // ============================================================================
 
 async function handleUserPromptInput(chatId, userId, text, promptState, env) {
   if (promptState.type === 'rename') {
     const raw = await env.SETTINGS_KV.get(`task:${promptState.taskId}`);
     if (!raw) {
-      await sendMessage(chatId, `⚠️ Task session expired.`, env);
+      await sendMessage(chatId, `<i>${sr('Task session expired.')}</i>`, env);
       return;
     }
     const task = JSON.parse(raw);
@@ -579,7 +593,7 @@ async function handleUserPromptInput(chatId, userId, text, promptState, env) {
     if (task.menuMsgId) {
       await editMessage(chatId, task.menuMsgId, buildTaskMenuMessage(task), env, buildTaskMenuKeyboard(task));
     }
-    await sendMessage(chatId, `✅ File renamed to: <code>${escapeHtml(task.customName)}</code>`, env);
+    await sendMessage(chatId, `<b>${sb('Renamed:')}</b>  <code>${escapeHtml(task.customName)}</code>`, env);
     return;
   }
 
@@ -596,8 +610,8 @@ async function handleUserPromptInput(chatId, userId, text, promptState, env) {
     await sendMessage(
       chatId,
       task.selectFilter
-        ? `✅ Extension filter set to: <code>${escapeHtml(task.selectFilter)}</code>`
-        : `✅ Filter cleared (all extracted files will be uploaded).`,
+        ? `<b>${sb('Extension Filter:')}</b>  <code>${escapeHtml(task.selectFilter)}</code>`
+        : `<b>${sb('Filter Cleared:')}</b>  ${sr('All extracted files will be uploaded.')}`,
       env
     );
     return;
@@ -606,7 +620,7 @@ async function handleUserPromptInput(chatId, userId, text, promptState, env) {
   if (promptState.type === 'mkdir') {
     const accessToken = await getValidAccessToken(userId, env);
     if (!accessToken) {
-      await sendMessage(chatId, `⚠️ Please /login first.`, env);
+      await sendMessage(chatId, `${sr('Please run')} /login ${sr('first.')}`, env);
       return;
     }
     const newFolderName = text.trim();
@@ -625,17 +639,16 @@ async function handleUserPromptInput(chatId, userId, text, promptState, env) {
     });
 
     if (!createRes.ok) {
-      await sendMessage(chatId, `❌ Failed to create folder on Google Drive.`, env);
+      await sendMessage(chatId, `<b>${sb('Error:')}</b> ${sr('Could not create folder on Google Drive.')}`, env);
       return;
     }
     const created = await createRes.json();
-    await sendMessage(chatId, `📁 Created folder <b>${escapeHtml(created.name)}</b>! Opening it now...`, env);
     await openFolderBrowser(chatId, userId, created.id, promptState.browserMsgId || null, promptState.returnTaskId || null, env);
   }
 }
 
 // ============================================================================
-// CALLBACK QUERY HANDLER (Buttons for Folder Browser, Task Menu, Status Card)
+// CALLBACK QUERY HANDLER
 // ============================================================================
 
 async function handleCallbackQuery(cb, env) {
@@ -644,11 +657,10 @@ async function handleCallbackQuery(cb, env) {
   const userId = cb.from.id;
   const data = cb.data || '';
 
-  // --- Folder Browser Callbacks ---
   if (data.startsWith('fb_')) {
     const bRaw = await env.SETTINGS_KV.get(`browser:${userId}`);
     if (!bRaw && data !== 'fb_close') {
-      await answerCb(cb.id, 'Browser session expired. Run /setdldir again.', true, env);
+      await answerCb(cb.id, 'Session expired. Run /setdldir again.', true, env);
       return;
     }
     const bState = bRaw ? JSON.parse(bRaw) : null;
@@ -669,7 +681,7 @@ async function handleCallbackQuery(cb, env) {
         await answerCb(cb.id, 'Not a folder', false, env);
         return;
       }
-      await answerCb(cb.id, `Opening ${item.name}...`, false, env);
+      await answerCb(cb.id, `Opening ${item.name}`, false, env);
       await openFolderBrowser(chatId, userId, item.id, msgId, bState.returnTaskId, env, 0);
       return;
     }
@@ -677,7 +689,7 @@ async function handleCallbackQuery(cb, env) {
       const idx = parseInt(data.split(':')[1], 10);
       const item = bState.items[idx];
       if (item) {
-        await answerCb(cb.id, `📄 ${item.name} (${fmtBytes(item.size)})`, true, env);
+        await answerCb(cb.id, `${item.name} (${fmtBytes(item.size)})`, true, env);
       }
       return;
     }
@@ -688,7 +700,7 @@ async function handleCallbackQuery(cb, env) {
       return;
     }
     if (data === 'fb_up') {
-      await answerCb(cb.id, 'Going up...', false, env);
+      await answerCb(cb.id, 'Parent folder', false, env);
       await openFolderBrowser(chatId, userId, bState.parentId || 'root', msgId, bState.returnTaskId, env, 0);
       return;
     }
@@ -703,10 +715,11 @@ async function handleCallbackQuery(cb, env) {
         }),
         { expirationTtl: 600 }
       );
-      await answerCb(cb.id, 'Send the new folder name', false, env);
+      await answerCb(cb.id, 'Send new folder name', false, env);
       await sendMessage(
         chatId,
-        `➕ <b>Create New Folder</b> inside <code>${escapeHtml(bState.currentName)}</code>:\n\nSend the new folder name now (or /cancel):`,
+        `<blockquote><b>${sb('NEW FOLDER')}</b>\n${sr('Parent:')} <code>${escapeHtml(bState.currentName)}</code></blockquote>\n\n` +
+          `${sr('Send the folder name now, or')} /cancel:`,
         env
       );
       return;
@@ -726,19 +739,19 @@ async function handleCallbackQuery(cb, env) {
           task.folderId = bState.currentId;
           task.folderName = bState.currentName;
           await env.SETTINGS_KV.put(`task:${task.taskId}`, JSON.stringify(task), { expirationTtl: 7200 });
-          await answerCb(cb.id, `Selected: ${bState.currentName}`, false, env);
+          await answerCb(cb.id, `Folder: ${bState.currentName}`, false, env);
           await editMessage(chatId, msgId, buildTaskMenuMessage(task), env, buildTaskMenuKeyboard(task));
           return;
         }
       }
 
-      await answerCb(cb.id, `Folder set to ${bState.currentName}!`, false, env);
+      await answerCb(cb.id, `Selected: ${bState.currentName}`, false, env);
       await editMessage(
         chatId,
         msgId,
-        `✅ <b>Download Folder Updated!</b>\n\n` +
-          `📁 <b>Selected Folder:</b> <code>${escapeHtml(bState.currentName)}</code>\n\n` +
-          `<i>Send any direct link or <code>/m &lt;link&gt;</code> to start mirroring. Use /setdldir anytime to change it.</i>`,
+        `<blockquote><b>${sb('UPLOAD DIRECTORY UPDATED')}</b></blockquote>\n\n` +
+          `┌ <b>${sb('Destination')}</b>   <code>${escapeHtml(bState.currentName)}</code>\n` +
+          `└ <b>${sb('Change')}</b>        /setdldir`,
         env
       );
       return;
@@ -750,17 +763,16 @@ async function handleCallbackQuery(cb, env) {
         const task = JSON.parse(tRaw);
         await editMessage(chatId, msgId, buildTaskMenuMessage(task), env, buildTaskMenuKeyboard(task));
       }
-      await answerCb(cb.id, 'Back to menu', false, env);
+      await answerCb(cb.id, 'Returned to task', false, env);
       return;
     }
   }
 
-  // --- Task Options Menu Callbacks ---
   if (data.startsWith('tm_')) {
     const [action, tid] = data.split(':');
     const tRaw = await env.SETTINGS_KV.get(`task:${tid}`);
     if (!tRaw) {
-      await answerCb(cb.id, 'This task menu has expired.', true, env);
+      await answerCb(cb.id, 'Task session expired.', true, env);
       return;
     }
     const task = JSON.parse(tRaw);
@@ -768,14 +780,14 @@ async function handleCallbackQuery(cb, env) {
 
     if (action === 'tm_cancel') {
       await env.SETTINGS_KV.delete(`task:${tid}`);
-      await editMessage(chatId, msgId, `⛔ <b>Task Cancelled.</b>`, env);
+      await editMessage(chatId, msgId, `<blockquote><b>${sb('TASK CANCELLED')}</b></blockquote>`, env);
       await answerCb(cb.id, 'Cancelled', false, env);
       return;
     }
 
     if (action === 'tm_back') {
       await editMessage(chatId, msgId, buildTaskMenuMessage(task), env, buildTaskMenuKeyboard(task));
-      await answerCb(cb.id, 'Refreshed', false, env);
+      await answerCb(cb.id, 'Updated', false, env);
       return;
     }
 
@@ -783,7 +795,7 @@ async function handleCallbackQuery(cb, env) {
       task.mode = task.mode === 'extract' ? 'normal' : 'extract';
       await env.SETTINGS_KV.put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
       await editMessage(chatId, msgId, buildTaskMenuMessage(task), env, buildTaskMenuKeyboard(task));
-      await answerCb(cb.id, `Extract mode: ${task.mode === 'extract' ? 'ON' : 'OFF'}`, false, env);
+      await answerCb(cb.id, `Extract: ${task.mode === 'extract' ? 'ON' : 'OFF'}`, false, env);
       return;
     }
 
@@ -791,7 +803,7 @@ async function handleCallbackQuery(cb, env) {
       task.mode = task.mode === 'zip' ? 'normal' : 'zip';
       await env.SETTINGS_KV.put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
       await editMessage(chatId, msgId, buildTaskMenuMessage(task), env, buildTaskMenuKeyboard(task));
-      await answerCb(cb.id, `Create ZIP mode: ${task.mode === 'zip' ? 'ON' : 'OFF'}`, false, env);
+      await answerCb(cb.id, `Create ZIP: ${task.mode === 'zip' ? 'ON' : 'OFF'}`, false, env);
       return;
     }
 
@@ -801,10 +813,11 @@ async function handleCallbackQuery(cb, env) {
         JSON.stringify({ type: 'rename', taskId: tid }),
         { expirationTtl: 600 }
       );
-      await answerCb(cb.id, 'Send the new file name', false, env);
+      await answerCb(cb.id, 'Send new file name', false, env);
       await sendMessage(
         chatId,
-        `✏️ <b>Rename File</b>\nCurrent: <code>${escapeHtml(task.customName || task.detectedName)}</code>\n\nSend the new file name (with extension) now, or /cancel:`,
+        `<blockquote><b>${sb('RENAME FILE')}</b>\n<code>${escapeHtml(task.customName || task.detectedName)}</code></blockquote>\n\n` +
+          `${sr('Send the new filename (including extension), or')} /cancel:`,
         env
       );
       return;
@@ -816,32 +829,34 @@ async function handleCallbackQuery(cb, env) {
         JSON.stringify({ type: 'select_filter', taskId: tid }),
         { expirationTtl: 600 }
       );
-      await answerCb(cb.id, 'Send file filter', false, env);
+      await answerCb(cb.id, 'Send extension filter', false, env);
       await sendMessage(
         chatId,
-        `📋 <b>Select File Filter (for Extracted Archives)</b>\n\nSend comma-separated file extensions to keep (e.g. <code>.mkv, .mp4, .srt</code>) or send <code>all</code> to keep everything:`,
+        `<blockquote><b>${sb('ARCHIVE EXTENSION FILTER')}</b></blockquote>\n\n` +
+          `${sr('Send comma-separated extensions to keep when extracting (e.g.')} <code>.mkv, .mp4, .srt</code>${sr(') or send')} <code>all</code>:`,
         env
       );
       return;
     }
 
     if (action === 'tm_dir') {
-      await answerCb(cb.id, 'Opening Folder Browser...', false, env);
+      await answerCb(cb.id, 'Opening Folder Browser', false, env);
       await openFolderBrowser(chatId, userId, task.folderId || 'root', msgId, tid, env, 0);
       return;
     }
 
     if (action === 'tm_info') {
       const infoMsg =
-        `ℹ️ <b>Link Inspection Details</b>\n\n` +
-        `📄 <b>Detected Name:</b> <code>${escapeHtml(task.detectedName)}</code>\n` +
-        `📊 <b>Exact Size:</b> <code>${fmtBytes(task.fileSize)}</code> (${task.fileSize.toLocaleString()} bytes)\n` +
-        `📦 <b>MIME Type:</b> <code>${escapeHtml(task.contentType)}</code>\n` +
-        `⚡ <b>Multi-Conn Range Support:</b> ${task.acceptRanges ? '✅ Yes (16x parallel)' : '⚠️ Single stream'}`;
+        `<blockquote><b>${sb('STREAM METADATA')}</b>\n` +
+        `<code>${escapeHtml(task.detectedName)}</code></blockquote>\n\n` +
+        `┌ <b>${sb('Size')}</b>         <code>${fmtBytes(task.fileSize)}</code>\n` +
+        `├ <b>${sb('Bytes')}</b>        <code>${task.fileSize.toLocaleString()} B</code>\n` +
+        `├ <b>${sb('MIME')}</b>         <code>${escapeHtml(task.contentType)}</code>\n` +
+        `└ <b>${sb('Range I/O')}</b>    <code>${task.acceptRanges ? 'Supported (16x)' : 'Single Stream'}</code>`;
       await editMessage(chatId, msgId, infoMsg, env, {
-        inline_keyboard: [[{ text: '↩️ Back to Options', callback_data: `tm_back:${tid}` }]]
+        inline_keyboard: [[{ text: '↩ Back to Options', callback_data: `tm_back:${tid}`, style: 'primary' }]]
       });
-      await answerCb(cb.id, 'File Info', false, env);
+      await answerCb(cb.id, 'Stream Metadata', false, env);
       return;
     }
 
@@ -851,38 +866,36 @@ async function handleCallbackQuery(cb, env) {
         profile.buttonMode = false;
         await saveUserProfile(userId, profile, env);
       }
-      await answerCb(cb.id, 'ButtonMode disabled! Starting mirror...', false, env);
+      await answerCb(cb.id, 'ButtonMode disabled. Starting...', false, env);
       await launchMirrorTask(task, env);
       return;
     }
 
     if (action === 'tm_start') {
-      await answerCb(cb.id, 'Verifying space & starting mirror...', false, env);
+      await answerCb(cb.id, 'Starting cloud runner...', false, env);
       await launchMirrorTask(task, env);
       return;
     }
   }
 
-  // --- Live Status Card Callbacks ---
   if (data.startsWith('st_')) {
     const [action, jobId] = data.split(':');
     if (action === 'st_close') {
       await deleteMessage(chatId, msgId, env);
-      await answerCb(cb.id, 'Closed status panel', false, env);
+      await answerCb(cb.id, 'Closed', false, env);
       return;
     }
     if (action === 'st_ref') {
-      await answerCb(cb.id, '⚡ Live updates refresh automatically every ~2.5s!', false, env);
+      await answerCb(cb.id, 'Live telemetry updates every 2.5s automatically.', false, env);
       return;
     }
     if (action === 'st_cancel') {
-      await answerCb(cb.id, 'Cancelling task...', false, env);
+      await answerCb(cb.id, 'Stopping task...', false, env);
       await cancelActiveJob(chatId, jobId, env);
       return;
     }
   }
 
-  // --- Settings Callbacks ---
   if (data.startsWith('cfg_')) {
     const profile = await getUserProfile(userId, env);
     if (!profile) return;
@@ -894,7 +907,7 @@ async function handleCallbackQuery(cb, env) {
       return;
     }
     if (data === 'cfg_dir') {
-      await answerCb(cb.id, 'Opening folder browser...', false, env);
+      await answerCb(cb.id, 'Opening directory browser', false, env);
       await openFolderBrowser(chatId, userId, profile.folderId || 'root', msgId, null, env, 0);
       return;
     }
@@ -909,83 +922,85 @@ async function launchMirrorTask(task, env) {
   const { chatId, userId, taskId, menuMsgId } = task;
   const accessToken = await getValidAccessToken(userId, env);
   if (!accessToken) {
-    await editMessage(chatId, menuMsgId, `❌ <b>Google Drive session expired.</b> Please run /login again.`, env);
-    return;
-  }
-
-  // 1. Check User's Google Drive Free Space & Runner Workspace Limits (~112 GiB usable)
-  const quota = await getDriveQuota(accessToken);
-  const fileSize = task.fileSize || 0;
-  const runnerLimitBytes = 112 * 1024 * 1024 * 1024; // 112 GiB after cleanup
-
-  let fallbackNotice = '';
-
-  if (fileSize > 0 && quota && quota.free !== Infinity) {
-    // Check if even raw file upload exceeds user's Google Drive free space
-    if (fileSize > quota.free) {
-      const msg =
-        `❌ <b>Insufficient Google Drive Space!</b>\n\n` +
-        `📄 <b>File:</b> <code>${escapeHtml(task.customName || task.detectedName)}</code>\n` +
-        `📦 <b>Required Space:</b> <code>${fmtBytes(fileSize)}</code>\n` +
-        `💾 <b>Your Drive Free Space:</b> <code>${fmtBytes(quota.free)}</code>\n\n` +
-        `<i>Due to insufficient space in your Google Drive, this upload cannot proceed. Free up space in your Drive and try again.</i>`;
-      await editMessage(chatId, menuMsgId, msg, env);
-      return;
-    }
-
-    // If Extract or ZIP selected, verify workspace (~2x file size needed on runner)
-    if (task.mode === 'extract' || task.mode === 'zip') {
-      const workspaceNeeded = fileSize * 2.1;
-      if (workspaceNeeded > runnerLimitBytes) {
-        fallbackNotice =
-          `⚠️ <b>Workspace Size Notice:</b> Performing <b>${task.mode.toUpperCase()}</b> requires ~<code>${fmtBytes(workspaceNeeded)}</code> temporary space, which exceeds the runner's 112 GiB workspace.\n` +
-          `➡️ Automatically switching to <b>Direct File Upload</b> (Drive Free: <code>${fmtBytes(quota.free)}</code>).\n\n`;
-        task.mode = 'normal';
-      }
-    }
-  }
-
-  // Check if single file exceeds runner disk
-  if (fileSize > runnerLimitBytes) {
     await editMessage(
       chatId,
       menuMsgId,
-      `❌ <b>File Exceeds Runner Capacity:</b> File size is <code>${fmtBytes(fileSize)}</code>, which exceeds the 112 GiB runner disk limit.`,
+      `<blockquote><b>${sb('SESSION EXPIRED')}</b>\n${sr('Please reconnect your Google Drive with')} /login.</blockquote>`,
       env
     );
     return;
   }
 
-  const quotaLine =
-    quota && quota.free !== Infinity
-      ? `💾 <b>Drive Space Left:</b> <code>${fmtBytes(quota.free)}</code> (Need: <code>${fmtBytes(fileSize)}</code>)\n`
-      : '';
+  const quota = await getDriveQuota(accessToken);
+  const fileSize = task.fileSize || 0;
+  const runnerLimitBytes = 112 * 1024 * 1024 * 1024;
+
+  let fallbackNotice = '';
+
+  if (fileSize > 0 && quota && quota.free !== Infinity) {
+    if (fileSize > quota.free) {
+      const msg =
+        `<blockquote><b>${sb('INSUFFICIENT DRIVE STORAGE')}</b>\n` +
+        `<code>${escapeHtml(task.customName || task.detectedName)}</code></blockquote>\n\n` +
+        `┌ <b>${sb('Required')}</b>     <code>${fmtBytes(fileSize)}</code>\n` +
+        `└ <b>${sb('Available')}</b>    <code>${fmtBytes(quota.free)}</code>\n\n` +
+        `<i>${sr('Free up space in your Google Drive and try again.')}</i>`;
+      await editMessage(chatId, menuMsgId, msg, env);
+      return;
+    }
+
+    if (task.mode === 'extract' || task.mode === 'zip') {
+      const workspaceNeeded = fileSize * 2.1;
+      if (workspaceNeeded > runnerLimitBytes) {
+        fallbackNotice =
+          `<blockquote><b>${sb('WORKSPACE NOTICE')}</b>\n` +
+          `${sr('Archive processing needs')} <code>${fmtBytes(workspaceNeeded)}</code>. ${sr('Switching to direct upload.')}</blockquote>\n\n`;
+        task.mode = 'normal';
+      }
+    }
+  }
+
+  if (fileSize > runnerLimitBytes) {
+    await editMessage(
+      chatId,
+      menuMsgId,
+      `<blockquote><b>${sb('CAPACITY LIMIT')}</b>\n` +
+        `${sr('File size')} (<code>${fmtBytes(fileSize)}</code>) ${sr('exceeds the 112 GiB runner workspace.')}</blockquote>`,
+      env
+    );
+    return;
+  }
+
+  const modeTag = task.mode === 'extract' ? '#Extract' : task.mode === 'zip' ? '#ArchiveZIP' : '#Mirror';
+  const freeDriveStr = quota && quota.free !== Infinity ? fmtBytes(quota.free) : 'Unlimited';
 
   const bootText =
     `${fallbackNotice}` +
-    `📄 <b>Name :</b> <code>${escapeHtml(task.customName || task.detectedName)}</code>\n\n` +
-    `┌ <b>Status :</b> Booting Cloud Runner.. (0.00%)\n` +
-    `├ [□□□□□□□□□□□□]\n` +
-    `├ <b>By :</b> @${escapeHtml(task.username)}\n` +
-    `├ <b>UserID :</b> [<code>${userId}</code>]\n` +
-    `├ <b>Size :</b> ${fileSize > 0 ? fmtBytes(fileSize) : 'Unknown'}\n` +
-    `├ <b>Folder :</b> ${escapeHtml(task.folderName)}\n` +
-    `├ <b>Mode :</b> #${task.mode === 'extract' ? 'Extract' : task.mode === 'zip' ? 'ArchiveZIP' : 'Mirror'}\n` +
-    `└ ⛔ /cancel_${taskId}\n\n` +
-    `${quotaLine}` +
-    `<i>⚡ Runner is waking up (~10–15s)... Live speed updates will appear here automatically.</i>`;
+    `<blockquote><b>${sb('FILE')}</b>\n` +
+    `<code>${escapeHtml(task.customName || task.detectedName)}</code></blockquote>\n\n` +
+    `┌ <b>${sb('Status')}</b>      <code>Initializing Runner.. (0.00%)</code>\n` +
+    `├ <code>[□□□□□□□□□□□□]</code>\n` +
+    `│\n` +
+    `├ <b>${sb('Size')}</b>        <code>${fileSize > 0 ? fmtBytes(fileSize) : 'Unknown'}</code>\n` +
+    `├ <b>${sb('Folder')}</b>      <code>${escapeHtml(task.folderName)}</code>\n` +
+    `├ <b>${sb('Drive Free')}</b>  <code>${freeDriveStr}</code>\n` +
+    `│\n` +
+    `├ <b>${sb('User')}</b>        @${escapeHtml(task.username)}  [<code>${userId}</code>]\n` +
+    `├ <b>${sb('Mode')}</b>        ${modeTag}\n` +
+    `└ <b>${sb('Cancel')}</b>      /cancel_${taskId}\n\n` +
+    `<pre><code class="language-SYSTEM">┌ 𝗦𝗬𝗦𝗧𝗘𝗠 𝗠𝗢𝗡𝗜𝗧𝗢𝗥\n` +
+    `└ Allocating dedicated cloud node (~10s)...</code></pre>`;
 
   await editMessage(chatId, menuMsgId, bootText, env, {
     inline_keyboard: [
       [
-        { text: '🔄 Refresh', callback_data: `st_ref:${taskId}` },
-        { text: '🔽 Close', callback_data: `st_close:${taskId}` }
+        { text: 'Refresh', callback_data: `st_ref:${taskId}`, style: 'primary' },
+        { text: 'Close', callback_data: `st_close:${taskId}`, style: 'danger' }
       ],
-      [{ text: '⛔ Cancel Task', callback_data: `st_cancel:${taskId}` }]
+      [{ text: 'Cancel Task', callback_data: `st_cancel:${taskId}`, style: 'danger' }]
     ]
   });
 
-  // Save job record in KV for the runner to pull securely
   const jobData = {
     jobId: taskId,
     userId,
@@ -1008,13 +1023,12 @@ async function launchMirrorTask(task, env) {
   await env.SETTINGS_KV.put(`job:${taskId}`, JSON.stringify(jobData), { expirationTtl: 25200 });
   await addActiveJobForUser(userId, taskId, env);
 
-  // Trigger GitHub Actions workflow with ONLY job_id
   const dispatched = await triggerGithubWorkflow(taskId, env);
   if (!dispatched) {
     await editMessage(
       chatId,
       menuMsgId,
-      `❌ <b>Failed to dispatch GitHub Actions workflow.</b> Please verify repository & token settings.`,
+      `<blockquote><b>${sb('DISPATCH ERROR')}</b>\n${sr('Could not trigger GitHub Actions runner.')}</blockquote>`,
       env
     );
   }
@@ -1111,7 +1125,7 @@ async function removeActiveJobForUser(userId, jobId, env) {
 async function cancelActiveJob(chatId, jobId, env) {
   const jRaw = await env.SETTINGS_KV.get(`job:${jobId}`);
   if (!jRaw) {
-    await sendMessage(chatId, `ℹ️ Task <code>${escapeHtml(jobId)}</code> is no longer active.`, env);
+    await sendMessage(chatId, `<i>${sr('Task')} <code>${escapeHtml(jobId)}</code> ${sr('is no longer active.')}</i>`, env);
     return;
   }
   const job = JSON.parse(jRaw);
@@ -1120,7 +1134,6 @@ async function cancelActiveJob(chatId, jobId, env) {
   await env.SETTINGS_KV.put(`job:${jobId}`, JSON.stringify(job), { expirationTtl: 3600 });
   await removeActiveJobForUser(job.userId, jobId, env);
 
-  // Also call GitHub API to cancel workflow run immediately if runId is known
   if (job.runId) {
     await fetch(
       `https://api.github.com/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/actions/runs/${job.runId}/cancel`,
@@ -1135,25 +1148,27 @@ async function cancelActiveJob(chatId, jobId, env) {
     );
   }
 
-  await sendMessage(chatId, `⛔ Cancellation signal sent for task <code>${escapeHtml(jobId)}</code>.`, env);
+  await sendMessage(chatId, `<b>${sb('Cancelling:')}</b>  <code>${escapeHtml(jobId)}</code>`, env);
 }
 
 async function sendActiveTasks(chatId, userId, env) {
   const raw = await env.SETTINGS_KV.get(`active:${userId}`);
   const list = raw ? JSON.parse(raw) : [];
   if (!list.length) {
-    await sendMessage(chatId, `📭 <b>No active tasks running right now.</b>`, env);
+    await sendMessage(chatId, `<blockquote><b>${sb('ACTIVE TASKS')}</b>\n<i>${sr('No transfers running right now.')}</i></blockquote>`, env);
     return;
   }
 
-  const lines = [`📋 <b>Active Tasks (${list.length}):</b>\n`];
+  const lines = [`<blockquote><b>${sb('ACTIVE TASKS')} (${list.length})</b></blockquote>\n`];
   for (const jid of list) {
     const jr = await env.SETTINGS_KV.get(`job:${jid}`);
     if (jr) {
       const j = JSON.parse(jr);
       lines.push(
-        `• <code>${escapeHtml(j.customName || j.detectedName)}</code> (${fmtBytes(j.fileSize)})\n` +
-          `  Status: <b>${escapeHtml(j.status)}</b> | ⛔ /cancel_${jid}`
+        `┌ <b>${sb('File')}</b>      <code>${escapeHtml(j.customName || j.detectedName)}</code>\n` +
+        `├ <b>${sb('Size')}</b>      <code>${fmtBytes(j.fileSize)}</code>\n` +
+        `├ <b>${sb('State')}</b>     <code>${escapeHtml(j.status)}</code>\n` +
+        `└ <b>${sb('Stop')}</b>      /cancel_${jid}\n`
       );
     }
   }
@@ -1169,37 +1184,36 @@ async function sendStartScreen(chatId, userId, username, env) {
   if (!profile || !profile.refreshToken) {
     const authUrl = await createOAuthUrl(chatId, userId, username, env);
     const text =
-      `👋 <b>Welcome to High-Speed Cloud Mirror Bot!</b>\n\n` +
-      `🚀 <b>Features:</b>\n` +
-      `• Multi-connection Gigabit Download (~1.8 Gbps)\n` +
-      `• Direct Upload to <b>Your Own Google Drive</b>\n` +
-      `• Interactive Folder Browser (<code>/setdldir</code>)\n` +
-      `• Rename, Extract Archives & Create ZIP\n` +
-      `• Live 2.5s Progress Bar & System Monitor\n\n` +
-      `🔑 <b>To get started, connect your Google Drive account below:</b>`;
+      `<blockquote><b>${sb('CLOUD MIRROR ENGINE')}</b>\n` +
+      `${sr('High-Speed On-Demand Google Drive Transfer')}</blockquote>\n\n` +
+      `┌ <b>${sb('Bandwidth')}</b>   <code>Up to 1.8 Gbps (16x Aria2c)</code>\n` +
+      `├ <b>${sb('Workspace')}</b>   <code>115 GB Dedicated Node</code>\n` +
+      `├ <b>${sb('Features')}</b>    <code>Rename • Extract • ZIP • Browse</code>\n` +
+      `└ <b>${sb('Telemetry')}</b>   <code>2.5s Live Progress & System Stats</code>\n\n` +
+      `<i>${sr('Connect your Google Drive account below to begin:')}</i>`;
     await sendMessage(chatId, text, env, {
-      inline_keyboard: [[{ text: '🔑 Connect Google Drive', url: authUrl }]]
+      inline_keyboard: [[{ text: '▸  Connect Google Drive', url: authUrl, style: 'primary' }]]
     });
     return;
   }
 
   const text =
-    `👋 <b>Welcome back, ${escapeHtml(username)}!</b>\n\n` +
-    `✅ <b>Connected Drive:</b> <code>${escapeHtml(profile.email)}</code>\n` +
-    `📁 <b>Current Folder:</b> <code>${escapeHtml(profile.folderName || 'My Drive')}</code>\n` +
-    `🎛️ <b>Button Mode:</b> <code>${profile.buttonMode !== false ? 'Enabled' : 'Disabled'}</code>\n\n` +
-    `📌 <b>Commands:</b>\n` +
-    `• Send any direct link or <code>/m &lt;link&gt;</code> to mirror\n` +
-    `• /setdldir — Browse & select target Drive folder\n` +
-    `• /tasks — View running mirror tasks\n` +
-    `• /settings — Toggle ButtonMode & preferences\n` +
-    `• /logout — Disconnect your Google Drive`;
+    `<blockquote><b>${sb('CLOUD MIRROR ENGINE')}</b>\n` +
+    `<code>${escapeHtml(profile.email)}</code></blockquote>\n\n` +
+    `┌ <b>${sb('Upload Folder')}</b>   <code>${escapeHtml(profile.folderName || 'My Drive')}</code>\n` +
+    `└ <b>${sb('Options Menu')}</b>    <code>${profile.buttonMode !== false ? 'Enabled' : 'Disabled'}</code>\n\n` +
+    `<b>${sb('COMMANDS')}</b>\n` +
+    `• <code>/m &lt;link&gt;</code> — ${sr('Mirror any direct file link')}\n` +
+    `• /setdldir — ${sr('Browse & select target folder')}\n` +
+    `• /tasks — ${sr('View active transfers')}\n` +
+    `• /settings — ${sr('Preferences')}\n` +
+    `• /logout — ${sr('Unlink Google Drive')}`;
 
   await sendMessage(chatId, text, env, {
     inline_keyboard: [
       [
-        { text: '📁 Change Folder (/setdldir)', callback_data: 'cfg_dir' },
-        { text: `🎛️ ButtonMode: ${profile.buttonMode !== false ? 'ON' : 'OFF'}`, callback_data: 'cfg_toggle_btn' }
+        { text: 'Browse Folder', callback_data: 'cfg_dir', style: 'primary' },
+        { text: `ButtonMode: ${profile.buttonMode !== false ? 'ON' : 'OFF'}`, callback_data: 'cfg_toggle_btn' }
       ]
     ]
   });
@@ -1207,14 +1221,14 @@ async function sendStartScreen(chatId, userId, username, env) {
 
 async function sendSettingsMenu(chatId, userId, profile, editMsgId, env) {
   const text =
-    `⚙️ <b>Bot Settings</b>\n\n` +
-    `👤 <b>Drive Account:</b> <code>${escapeHtml(profile.email)}</code>\n` +
-    `📁 <b>Target Folder:</b> <code>${escapeHtml(profile.folderName || 'My Drive')}</code>\n` +
-    `🎛️ <b>Task Options Menu (ButtonMode):</b> <code>${profile.buttonMode !== false ? 'ON' : 'OFF'}</code>`;
+    `<blockquote><b>${sb('PREFERENCES')}</b>\n` +
+    `<code>${escapeHtml(profile.email)}</code></blockquote>\n\n` +
+    `┌ <b>${sb('Target Folder')}</b>   <code>${escapeHtml(profile.folderName || 'My Drive')}</code>\n` +
+    `└ <b>${sb('ButtonMode')}</b>      <code>${profile.buttonMode !== false ? 'Enabled' : 'Disabled'}</code>`;
   const kb = {
     inline_keyboard: [
-      [{ text: '📁 Browse / Change Folder', callback_data: 'cfg_dir' }],
-      [{ text: `🎛️ Toggle ButtonMode (${profile.buttonMode !== false ? 'ON' : 'OFF'})`, callback_data: 'cfg_toggle_btn' }]
+      [{ text: 'Browse / Change Folder', callback_data: 'cfg_dir', style: 'primary' }],
+      [{ text: `Toggle ButtonMode (${profile.buttonMode !== false ? 'ON' : 'OFF'})`, callback_data: 'cfg_toggle_btn' }]
     ]
   };
   if (editMsgId) {
@@ -1233,7 +1247,6 @@ async function verifyDirectLink(url) {
       redirect: 'follow'
     });
 
-    // Fallback to Range GET if server blocks HEAD (common on Google usercontent & presigned URLs)
     if (!res.ok || res.status === 405 || res.status === 403) {
       const controller = new AbortController();
       res = await fetch(url, {
@@ -1260,7 +1273,7 @@ async function verifyDirectLink(url) {
     }
 
     if (contentType.includes('text/html') && !contentDisp.toLowerCase().includes('attachment')) {
-      return { valid: false, reason: 'URL points to an HTML webpage instead of a direct file stream.' };
+      return { valid: false, reason: 'URL points to an HTML webpage rather than a direct file.' };
     }
 
     let fileName = 'download.bin';

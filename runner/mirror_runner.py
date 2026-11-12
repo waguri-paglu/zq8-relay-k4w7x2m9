@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-On-Demand Gigabit Mirror Runner for GitHub Actions.
-Features:
-- Fetches job metadata and short-lived Google OAuth access token from Cloudflare Worker
-- Multi-connection download via aria2c JSON-RPC with 2.5s live Telegram progress updates
-- System resource monitor (CPU, RAM, Free Disk, Network RX/TX, Uptime)
-- Optional Extract (7z / tar / unrar) and Create ZIP modes with space verification
-- High-speed Google Drive upload via rclone RC API with 2.5s live progress updates
-- Clean cancellation handling via Worker status & SIGTERM/SIGINT traps
+On-Demand Gigabit Mirror Runner for GitHub Actions — Refined UI Edition.
+- Native Telegram <blockquote> file cards & <pre><code class="language-SYSTEM"> aligned telemetry blocks
+- Custom Unicode Mathematical Sans-Serif Bold & Regular typography
+- Colored InlineKeyboardButtons (style: "primary" | "danger" | "success")
+- Spacious, breathable layout with zero emoji clutter
 """
 
 import html
@@ -34,6 +31,23 @@ OUT_DIR = WORK_DIR / "output"
 
 cancelled = False
 
+SANS_BOLD = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+    "𝗔𝗕𝗖𝗗𝗘𝗙𝗚𝗛𝗜𝗝𝗞𝗟𝗠𝗡𝗢𝗣𝗤𝗥𝗦𝗧𝗨𝗩𝗪𝗫𝗬𝗭𝗮𝗯𝗰𝗱𝗲𝗳𝗴𝗵𝗶𝗷𝗸𝗹𝗺𝗻𝗼𝗽𝗾𝗿𝘀𝘁𝘂𝘃𝘄𝘅𝘆𝘇𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵",
+)
+SANS_REG = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+    "𝖠𝖡𝖢𝖣𝖤𝖥𝖦𝖧𝖨𝖩𝖪𝖫𝖬𝖭𝖮𝖯𝖰𝖱𝖲𝖳𝖴𝖵𝖶𝖷𝖸𝖹𝖺𝖻𝖼𝖽𝖾𝖿𝗀𝗁𝗂𝗃𝗄𝗅𝗆𝗇𝗈𝗉𝗊𝗋𝗌𝗍𝗎𝗏𝗐𝗑𝗒𝗓𝟢𝟣𝟤𝟥𝟦𝟧𝟨𝟩𝟪𝟫",
+)
+
+
+def sb(text: str) -> str:
+    return str(text).translate(SANS_BOLD)
+
+
+def sr(text: str) -> str:
+    return str(text).translate(SANS_REG)
+
 
 def handle_sig(signum, frame):
     global cancelled
@@ -50,7 +64,7 @@ def mask_secret(val: str):
 
 
 def http_json(url: str, data: dict = None, headers: dict = None, method: str = None, timeout: int = 15):
-    req_headers = {"Content-Type": "application/json", "User-Agent": "MirrorRunner/2.0"}
+    req_headers = {"Content-Type": "application/json", "User-Agent": "MirrorRunner/2.1"}
     if headers:
         req_headers.update(headers)
     body = json.dumps(data).encode("utf-8") if data is not None else None
@@ -121,9 +135,9 @@ def fmt_duration(seconds: float) -> str:
     h, rem = divmod(seconds, 3600)
     m, s = divmod(rem, 60)
     if h > 0:
-        return f"{h}h{m}m{s}s"
+        return f"{h}h {m:02d}m {s:02d}s"
     if m > 0:
-        return f"{m}m{s}s"
+        return f"{m}m {s:02d}s"
     return f"{s}s"
 
 
@@ -172,14 +186,12 @@ class SystemMonitor:
         now = time.time()
         dt = max(0.5, now - self.prev_time)
 
-        # CPU
         idle1, total1 = self.prev_cpu
         idle2, total2 = self._read_cpu()
         self.prev_cpu = (idle2, total2)
         d_total = max(1, total2 - total1)
         cpu_pct = max(0.0, min(100.0, 100.0 * (1.0 - (idle2 - idle1) / d_total)))
 
-        # RAM
         ram_pct = 0.0
         try:
             mem = {}
@@ -193,12 +205,10 @@ class SystemMonitor:
         except Exception:
             pass
 
-        # Disk
         du = shutil.disk_usage("/")
         free_gb = du.free / (1024 ** 3)
         disk_used_pct = 100.0 * du.used / max(1, du.total)
 
-        # Net
         rx2, tx2 = self._read_net()
         rx_spd = max(0.0, (rx2 - self.prev_net[0]) / dt)
         tx_spd = max(0.0, (tx2 - self.prev_net[1]) / dt)
@@ -216,14 +226,6 @@ class SystemMonitor:
             "tx_tot": fmt_bytes(max(0, tx2 - self.base_tx)),
             "uptime": fmt_duration(now - self.start_time),
         }
-
-
-def dot_for(pct: float) -> str:
-    if pct >= 85:
-        return "🔴"
-    if pct >= 60:
-        return "🟠"
-    return "🟢"
 
 
 def build_status_card(
@@ -252,31 +254,35 @@ def build_status_card(
     ram_bar = make_bar(sys_snap["ram_pct"], 10)
     disk_bar = make_bar(sys_snap["disk_pct"], 10)
 
+    total_str = fmt_bytes(total_bytes) if total_bytes > 0 else "Unknown"
+    done_str = fmt_bytes(done_bytes)
+
+    sys_block = (
+        f"┌ 𝗦𝗬𝗦𝗧𝗘𝗠 𝗠𝗢𝗡𝗜𝗧𝗢𝗥\n"
+        f"├ CPU   [{cpu_bar}] {sys_snap['cpu_pct']:5.1f}%\n"
+        f"├ RAM   [{ram_bar}] {sys_snap['ram_pct']:5.1f}%\n"
+        f"├ DISK  [{disk_bar}] {sys_snap['free_gb']:5.1f} GB free\n"
+        f"│\n"
+        f"├ SPD   ↓ {sys_snap['rx_spd']:<12} ↑ {sys_snap['tx_spd']}\n"
+        f"├ NET   ↓ {sys_snap['rx_tot']:<12} ↑ {sys_snap['tx_tot']}\n"
+        f"└ UPT   {sys_snap['uptime']}"
+    )
+
     lines = [
-        f"📄 <b>Name :</b> <code>{html.escape(filename)}</code>",
+        f"<blockquote><b>{sb('FILE')}</b>\n<code>{html.escape(filename)}</code></blockquote>",
         "",
-        f"┌ <b>Status :</b> {html.escape(status_text)} ({pct:.2f}%)",
-        f"├ [{bar}]",
-        f"├ <b>By :</b> {html.escape(uname)}",
-        f"├ <b>UserID :</b> [<code>{html.escape(str(uid))}</code>]",
-        f"├ <b>Elapsed :</b> {fmt_duration(elapsed_sec)}",
-        f"├ <b>Size :</b> {fmt_bytes(total_bytes) if total_bytes > 0 else 'Unknown'}",
-        f"├ <b>Processed :</b> {fmt_bytes(done_bytes)}",
-        f"├ <b>ETA :</b> {fmt_duration(eta_sec)}",
-        f"├ <b>Speed :</b> {fmt_bytes(speed_bps)}/s",
-        f"├ <b>Engine :</b> {html.escape(engine)}",
-        f"├ <b>Mode :</b> #{mode_str}",
-        f"└ ⛔ /cancel_{html.escape(short_id)}",
+        f"┌ <b>{sb('Status')}</b>      <code>{html.escape(status_text)} ({pct:.2f}%)</code>",
+        f"├ <code>[{bar}]</code>",
+        "│",
+        f"├ <b>{sb('Speed')}</b>       <code>{fmt_bytes(speed_bps)}/s</code>",
+        f"├ <b>{sb('Progress')}</b>    <code>{done_str}</code> / <code>{total_str}</code>",
+        f"├ <b>{sb('ETA')}</b>         <code>{fmt_duration(eta_sec)}</code>  <i>({fmt_duration(elapsed_sec)})</i>",
+        "│",
+        f"├ <b>{sb('User')}</b>        {html.escape(uname)}  [<code>{html.escape(str(uid))}</code>]",
+        f"├ <b>{sb('Engine')}</b>      <code>{html.escape(engine)}</code>  •  #{mode_str}",
+        f"└ <b>{sb('Cancel')}</b>      /cancel_{html.escape(short_id)}",
         "",
-        "────────────────────",
-        "",
-        "┌ <b>SYSTEM</b>",
-        f"├ {dot_for(sys_snap['cpu_pct'])} <b>Cpu</b> [{cpu_bar}] {sys_snap['cpu_pct']:.1f}%",
-        f"├ {dot_for(sys_snap['ram_pct'])} <b>Ram</b> [{ram_bar}] {sys_snap['ram_pct']:.1f}%",
-        f"├ {dot_for(sys_snap['disk_pct'])} <b>Free</b> [{disk_bar}] {sys_snap['free_gb']:.2f}GB",
-        f"├ ⚡ <b>Spd</b> ↓ {sys_snap['rx_spd']} ↑ {sys_snap['tx_spd']}",
-        f"├ 🌐 <b>Net</b> ↓ {sys_snap['rx_tot']} ↑ {sys_snap['tx_tot']}",
-        f"└ 🕒 <b>Upt</b> {sys_snap['uptime']}",
+        f"<pre><code class=\"language-SYSTEM\">{html.escape(sys_block)}</code></pre>",
     ]
     return "\n".join(lines)
 
@@ -285,11 +291,11 @@ def status_keyboard(job_id: str) -> dict:
     return {
         "inline_keyboard": [
             [
-                {"text": "🔄 Refresh", "callback_data": f"st_ref:{job_id}"},
-                {"text": "🔽 Close", "callback_data": f"st_close:{job_id}"},
+                {"text": "Refresh", "callback_data": f"st_ref:{job_id}", "style": "primary"},
+                {"text": "Close", "callback_data": f"st_close:{job_id}", "style": "danger"},
             ],
             [
-                {"text": "⛔ Cancel Task", "callback_data": f"st_cancel:{job_id}"},
+                {"text": "Cancel Task", "callback_data": f"st_cancel:{job_id}", "style": "danger"},
             ],
         ]
     }
@@ -376,7 +382,6 @@ def main():
     mask_secret(JOB_SECRET)
     mask_secret(BOT_TOKEN)
 
-    # 1. Fetch job details from Cloudflare Worker
     init_res = worker_call("/internal/job", {"job_id": JOB_ID, "run_id": GITHUB_RUN_ID})
     if not init_res.get("ok"):
         print("Failed to fetch job from worker:", init_res.get("error"), flush=True)
@@ -402,7 +407,6 @@ def main():
     sys_mon = SystemMonitor()
     task_start = time.time()
 
-    # Start aria2c daemon
     aria_proc = subprocess.Popen(
         [
             "aria2c",
@@ -438,7 +442,6 @@ def main():
         total_len = 0
         done_len = 0
 
-        # Download Monitor Loop
         while True:
             if cancelled:
                 aria2_rpc("aria2.forceRemove", [gid])
@@ -476,13 +479,13 @@ def main():
                 card = build_status_card(
                     job=job,
                     filename=cur_filename,
-                    status_text="Download..",
+                    status_text="Downloading",
                     pct=pct,
                     done_bytes=done_len,
                     total_bytes=total_len,
                     speed_bps=dl_spd,
                     eta_sec=eta,
-                    engine="Aria2c v1.37.0",
+                    engine="Aria2c v1.37",
                     elapsed_sec=now - task_start,
                     sys_snap=snap,
                 )
@@ -496,7 +499,6 @@ def main():
 
             time.sleep(1.0)
 
-        # Locate downloaded file
         dl_files = [p for p in DL_DIR.iterdir() if p.is_file() and not p.name.endswith(".aria2")]
         if not dl_files:
             raise RuntimeError("No file found after download completed.")
@@ -504,34 +506,31 @@ def main():
         cur_filename = downloaded_path.name
         file_size = downloaded_path.stat().st_size
 
-        # Check disk space before Extract / ZIP
         du_free = shutil.disk_usage("/").free
         upload_target_path = downloaded_path
         upload_is_dir = False
 
         if mode in ("extract", "zip"):
             if du_free < file_size * 1.15:
-                # Fallback to direct upload if runner disk is tight
                 send_message(
                     chat_id,
-                    f"⚠️ <b>Runner Disk Notice:</b> File is <code>{fmt_bytes(file_size)}</code> and remaining workspace is <code>{fmt_bytes(du_free)}</code>.\n"
-                    f"Skipping <b>{mode.upper()}</b> and uploading the original file directly.",
+                    f"<blockquote><b>{sb('WORKSPACE NOTICE')}</b>\n"
+                    f"{sr('Remaining disk')} (<code>{fmt_bytes(du_free)}</code>) {sr('is tight for archive extraction. Uploading original file directly.')}</blockquote>",
                 )
                 mode = "normal"
 
-        # 2. Optional Extract or ZIP step
         if mode == "extract":
             snap = sys_mon.snapshot()
             card = build_status_card(
                 job=job,
                 filename=cur_filename,
-                status_text="Extracting..",
+                status_text="Extracting",
                 pct=50.0,
                 done_bytes=file_size,
                 total_bytes=file_size,
                 speed_bps=0,
                 eta_sec=None,
-                engine="7-Zip / Archive",
+                engine="7-Zip Engine",
                 elapsed_sec=time.time() - task_start,
                 sys_snap=snap,
             )
@@ -548,12 +547,11 @@ def main():
             ext_cmd = ["7z", "x", "-y", f"-o{extract_subdir}", str(downloaded_path)]
             res = subprocess.run(ext_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             if res.returncode != 0:
-                # Fallback to tar if 7z couldn't handle it
                 tar_res = subprocess.run(["tar", "-xf", str(downloaded_path), "-C", str(extract_subdir)])
                 if tar_res.returncode != 0:
                     send_message(
                         chat_id,
-                        "⚠️ <b>Extraction failed or unsupported archive format.</b> Uploading original file instead.",
+                        f"<blockquote><b>{sb('EXTRACTION NOTICE')}</b>\n{sr('Unsupported archive format. Uploading original file instead.')}</blockquote>",
                     )
                     upload_target_path = downloaded_path
                     upload_is_dir = False
@@ -568,7 +566,6 @@ def main():
                 upload_is_dir = True
                 cur_filename = extract_subdir.name
 
-            # Apply optional file extension filter (Select)
             if upload_is_dir and select_filter:
                 exts = [e.strip().lower() for e in select_filter.split(",") if e.strip()]
                 if exts:
@@ -586,13 +583,13 @@ def main():
             card = build_status_card(
                 job=job,
                 filename=zip_name,
-                status_text="Archiving (ZIP)..",
+                status_text="Archiving ZIP",
                 pct=50.0,
                 done_bytes=file_size,
                 total_bytes=file_size,
                 speed_bps=0,
                 eta_sec=None,
-                engine="7-Zip Store/Fast",
+                engine="7-Zip Fast",
                 elapsed_sec=time.time() - task_start,
                 sys_snap=snap,
             )
@@ -611,7 +608,6 @@ def main():
                 cur_filename = zip_path.name
                 file_size = zip_path.stat().st_size
 
-        # 3. Refresh Google OAuth access token right before upload
         ref_res = worker_call("/internal/refresh", {"job_id": JOB_ID})
         if ref_res.get("ok") and ref_res.get("accessToken"):
             access_token = ref_res["accessToken"]
@@ -619,10 +615,8 @@ def main():
 
         write_rclone_conf(access_token)
 
-        # Determine destination in Google Drive
         target_drive_folder_id = folder_id if folder_id else "root"
         if upload_is_dir:
-            # Create subfolder on Drive so extracted contents stay organized
             target_drive_folder_id = create_drive_subfolder(access_token, folder_id, cur_filename)
 
         rclone_dest = (
@@ -631,7 +625,6 @@ def main():
             else "userdrive:"
         )
 
-        # Start rclone with RC server enabled for live stats
         rclone_proc = subprocess.Popen(
             [
                 "rclone",
@@ -676,13 +669,13 @@ def main():
                 card = build_status_card(
                     job=job,
                     filename=cur_filename,
-                    status_text="Uploading to Drive..",
+                    status_text="Uploading",
                     pct=up_pct,
                     done_bytes=up_done,
                     total_bytes=up_total,
                     speed_bps=up_spd,
                     eta_sec=up_eta,
-                    engine="Rclone Google Drive",
+                    engine="Rclone Drive",
                     elapsed_sec=now - task_start,
                     sys_snap=snap,
                 )
@@ -693,7 +686,6 @@ def main():
         if rclone_proc.returncode != 0:
             raise RuntimeError(f"Rclone upload exited with code {rclone_proc.returncode}")
 
-        # 4. Fetch Drive webViewLink & Send Completion Card
         if upload_is_dir:
             drive_link = f"https://drive.google.com/drive/folders/{target_drive_folder_id}"
         else:
@@ -711,18 +703,18 @@ def main():
             uname = "@" + uname
 
         done_text = (
-            f"✅ <b>Mirror Completed!</b>\n\n"
-            f"📄 <b>Name :</b> <code>{html.escape(cur_filename)}</code>\n"
-            f"📊 <b>Size :</b> <code>{fmt_bytes(file_size)}</code>\n"
-            f"📁 <b>Folder :</b> <code>{html.escape(folder_name)}</code>\n"
-            f"⏱️ <b>Elapsed :</b> <code>{total_elapsed}</code>\n"
-            f"👤 <b>By :</b> {html.escape(uname)}"
+            f"<blockquote><b>{sb('TRANSFER COMPLETE')}</b>\n"
+            f"<code>{html.escape(cur_filename)}</code></blockquote>\n\n"
+            f"┌ <b>{sb('Size')}</b>         <code>{fmt_bytes(file_size)}</code>\n"
+            f"├ <b>{sb('Folder')}</b>       <code>{html.escape(folder_name)}</code>\n"
+            f"├ <b>{sb('Elapsed')}</b>      <code>{total_elapsed}</code>\n"
+            f"└ <b>{sb('User')}</b>         {html.escape(uname)}"
         )
         done_kb = {
             "inline_keyboard": [
                 [
-                    {"text": "🔗 Open File in Drive", "url": drive_link},
-                    {"text": "📁 Open Folder", "url": folder_url},
+                    {"text": "▸  Open File", "url": drive_link, "style": "success"},
+                    {"text": "Open Folder", "url": folder_url, "style": "primary"},
                 ]
             ]
         }
@@ -731,17 +723,17 @@ def main():
 
     except InterruptedError:
         cancel_text = (
-            f"⛔ <b>Task Cancelled</b>\n\n"
-            f"📄 <b>File :</b> <code>{html.escape(job.get('detectedName') or 'Task')}</code>\n"
-            f"🆔 <b>Task ID :</b> <code>{html.escape(JOB_ID)}</code>"
+            f"<blockquote><b>{sb('TASK CANCELLED')}</b>\n"
+            f"<code>{html.escape(job.get('detectedName') or 'Task')}</code></blockquote>\n\n"
+            f"└ <b>{sb('Task ID')}</b>   <code>{html.escape(JOB_ID)}</code>"
         )
         edit_status(chat_id, message_id, cancel_text)
         worker_call("/internal/complete", {"job_id": JOB_ID, "status": "cancelled"})
     except Exception as e:
         err_text = (
-            f"❌ <b>Task Failed</b>\n\n"
-            f"📄 <b>File :</b> <code>{html.escape(job.get('detectedName') or 'Task')}</code>\n"
-            f"⚠️ <b>Reason :</b> <code>{html.escape(str(e)[:300])}</code>"
+            f"<blockquote><b>{sb('TRANSFER FAILED')}</b>\n"
+            f"<code>{html.escape(job.get('detectedName') or 'Task')}</code></blockquote>\n\n"
+            f"└ <b>{sb('Reason')}</b>   <code>{html.escape(str(e)[:300])}</code>"
         )
         edit_status(chat_id, message_id, err_text)
         worker_call("/internal/complete", {"job_id": JOB_ID, "status": "failed", "error": str(e)})
