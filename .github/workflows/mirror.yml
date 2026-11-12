@@ -1,0 +1,132 @@
+name: Mirror to Google Drive
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_url:
+        description: 'Direct Download URL'
+        required: true
+      chat_id:
+        description: 'Telegram Chat ID to notify'
+        required: true
+      message_id:
+        description: 'Telegram Message ID to update/reply'
+        required: false
+        default: ''
+      folder_id:
+        description: 'Target Google Drive Folder ID'
+        required: false
+        default: ''
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Tools (aria2 & rclone)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq aria2 rclone curl jq
+
+      - name: Setup Rclone Configuration
+        run: |
+          mkdir -p ~/.config/rclone
+          echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
+          chmod 600 ~/.config/rclone/rclone.conf
+
+      - name: Notify Download Started
+        if: ${{ inputs.message_id != '' }}
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/editMessageText" \
+            -d "chat_id=${{ github.event.inputs.chat_id }}" \
+            -d "message_id=${{ github.event.inputs.message_id }}" \
+            -d "text=⚡ *Worker Active!*%0A🚀 Downloading file via gigabit runner..." \
+            -d "parse_mode=Markdown" || true
+
+      - name: Download File via aria2c
+        id: dl
+        run: |
+          mkdir -p downloads
+          cd downloads
+          aria2c -x 16 -s 16 -k 1M --file-allocation=none --summary-interval=10 --console-log-level=warn "${{ github.event.inputs.file_url }}"
+          
+          # Detect downloaded file name and size
+          DOWNLOADED_FILE=$(find . -maxdepth 1 -type f ! -name "*.aria2" | head -n 1)
+          if [ -z "$DOWNLOADED_FILE" ]; then
+            echo "Error: No file was downloaded."
+            exit 1
+          fi
+          
+          RAW_NAME=$(basename "$DOWNLOADED_FILE")
+          FILE_SIZE=$(du -h "$DOWNLOADED_FILE" | cut -f1)
+          
+          echo "filename=$RAW_NAME" >> "$GITHUB_OUTPUT"
+          echo "filesize=$FILE_SIZE" >> "$GITHUB_OUTPUT"
+          echo "Downloaded: $RAW_NAME ($FILE_SIZE)"
+
+      - name: Notify Uploading
+        if: ${{ inputs.message_id != '' }}
+        run: |
+          SAFE_NAME=$(jq -rn --arg x "${{ steps.dl.outputs.filename }}" '$x|@uri')
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/editMessageText" \
+            -d "chat_id=${{ github.event.inputs.chat_id }}" \
+            -d "message_id=${{ github.event.inputs.message_id }}" \
+            -d "text=☁️ *Downloaded!*%0A📁 *File:* $SAFE_NAME (${{ steps.dl.outputs.filesize }})%0A⬆️ Uploading to Google Drive..." \
+            -d "parse_mode=Markdown" || true
+
+      - name: Upload to Google Drive via Rclone
+        id: upload
+        run: |
+          FOLDER="${{ github.event.inputs.folder_id }}"
+          if [ -n "$FOLDER" ]; then
+            DEST="gdrive:$FOLDER"
+          else
+            DEST="gdrive:"
+          fi
+          
+          FILE_PATH="downloads/${{ steps.dl.outputs.filename }}"
+          echo "Uploading $FILE_PATH to $DEST ..."
+          rclone copy "$FILE_PATH" "$DEST" --drive-chunk-size 64M -P --stats-one-line
+          
+          # Try to generate shareable link
+          LINK=$(rclone link "$DEST/${{ steps.dl.outputs.filename }}" 2>/dev/null || echo "")
+          echo "drive_link=$LINK" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Complete
+        if: success()
+        run: |
+          LINK="${{ steps.upload.outputs.drive_link }}"
+          FNAME="${{ steps.dl.outputs.filename }}"
+          FSIZE="${{ steps.dl.outputs.filesize }}"
+          
+          if [ -n "$LINK" ]; then
+            LINK_TEXT="[Open in Google Drive]($LINK)"
+          else
+            LINK_TEXT="_Uploaded to your Google Drive folder._"
+          fi
+          
+          TEXT="✅ *Transfer Complete!*%0A%0A📁 *File:* \`$FNAME\`%0A📊 *Size:* $FSIZE%0A🔗 *Link:* $LINK_TEXT"
+          
+          # If we had a status message, edit it; otherwise send a new message
+          if [ -n "${{ github.event.inputs.message_id }}" ]; then
+            curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/editMessageText" \
+              -d "chat_id=${{ github.event.inputs.chat_id }}" \
+              -d "message_id=${{ github.event.inputs.message_id }}" \
+              -d "text=$TEXT" \
+              -d "parse_mode=Markdown" \
+              -d "disable_web_page_preview=true"
+          else
+            curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+              -d "chat_id=${{ github.event.inputs.chat_id }}" \
+              -d "text=$TEXT" \
+              -d "parse_mode=Markdown" \
+              -d "disable_web_page_preview=true"
+          fi
+
+      - name: Notify Failure
+        if: failure()
+        run: |
+          ERR_MSG="❌ *Workflow Failed!*%0AAn error occurred while downloading or uploading the file. Check Actions logs for details."
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ github.event.inputs.chat_id }}" \
+            -d "text=$ERR_MSG" \
+            -d "parse_mode=Markdown"
