@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-On-Demand Gigabit Mirror Runner for GitHub Actions — Refined UI Edition.
-- Native Telegram <blockquote> file cards & <pre><code class="language-SYSTEM"> aligned telemetry blocks
-- Custom Unicode Mathematical Sans-Serif Bold & Regular typography
+On-Demand Gigabit Mirror Runner for GitHub Actions.
+- Clean native Telegram typography (lightweight, spacious, zero Unicode glyph clipping)
+- Native <blockquote> file cards & <pre><code class="language-SYSTEM"> aligned telemetry blocks
 - Colored InlineKeyboardButtons (style: "primary" | "danger" | "success")
-- Spacious, breathable layout with zero emoji clutter
 """
 
 import html
@@ -30,23 +29,6 @@ DL_DIR = WORK_DIR / "downloads"
 OUT_DIR = WORK_DIR / "output"
 
 cancelled = False
-
-SANS_BOLD = str.maketrans(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
-    "𝗔𝗕𝗖𝗗𝗘𝗙𝗚𝗛𝗜𝗝𝗞𝗟𝗠𝗡𝗢𝗣𝗤𝗥𝗦𝗧𝗨𝗩𝗪𝗫𝗬𝗭𝗮𝗯𝗰𝗱𝗲𝗳𝗴𝗵𝗶𝗷𝗸𝗹𝗺𝗻𝗼𝗽𝗾𝗿𝘀𝘁𝘂𝘃𝘄𝘅𝘆𝘇𝟬𝟭𝟮𝟯𝟰𝟱𝟲𝟳𝟴𝟵",
-)
-SANS_REG = str.maketrans(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
-    "𝖠𝖡𝖢𝖣𝖤𝖥𝖦𝖧𝖨𝖩𝖪𝖫𝖬𝖭𝖮𝖯𝖰𝖱𝖲𝖳𝖴𝖵𝖶𝖷𝖸𝖹𝖺𝖻𝖼𝖽𝖾𝖿𝗀𝗁𝗂𝗃𝗄𝗅𝗆𝗇𝗈𝗉𝗊𝗋𝗌𝗍𝗎𝗏𝗐𝗑𝗒𝗓𝟢𝟣𝟤𝟥𝟦𝟧𝟨𝟩𝟪𝟫",
-)
-
-
-def sb(text: str) -> str:
-    return str(text).translate(SANS_BOLD)
-
-
-def sr(text: str) -> str:
-    return str(text).translate(SANS_REG)
 
 
 def handle_sig(signum, frame):
@@ -258,33 +240,32 @@ def build_status_card(
     done_str = fmt_bytes(done_bytes)
 
     sys_block = (
-        f"┌ 𝗦𝗬𝗦𝗧𝗘𝗠 𝗠𝗢𝗡𝗜𝗧𝗢𝗥\n"
-        f"├ CPU   [{cpu_bar}] {sys_snap['cpu_pct']:5.1f}%\n"
-        f"├ RAM   [{ram_bar}] {sys_snap['ram_pct']:5.1f}%\n"
-        f"├ DISK  [{disk_bar}] {sys_snap['free_gb']:5.1f} GB free\n"
-        f"│\n"
-        f"├ SPD   ↓ {sys_snap['rx_spd']:<12} ↑ {sys_snap['tx_spd']}\n"
-        f"├ NET   ↓ {sys_snap['rx_tot']:<12} ↑ {sys_snap['tx_tot']}\n"
-        f"└ UPT   {sys_snap['uptime']}"
+        f"SYSTEM MONITOR\n\n"
+        f"CPU   [{cpu_bar}]  {sys_snap['cpu_pct']:5.1f}%\n\n"
+        f"RAM   [{ram_bar}]  {sys_snap['ram_pct']:5.1f}%\n\n"
+        f"DISK  [{disk_bar}]  {sys_snap['free_gb']:5.1f} GB free\n\n"
+        f"SPD   ↓ {sys_snap['rx_spd']:<12}  ↑ {sys_snap['tx_spd']}\n\n"
+        f"NET   ↓ {sys_snap['rx_tot']:<12}  ↑ {sys_snap['tx_tot']}\n\n"
+        f"UPT   {sys_snap['uptime']}"
     )
 
     lines = [
-        f"<blockquote><b>{sb('FILE')}</b>\n<code>{html.escape(filename)}</code></blockquote>",
+        f"<blockquote><b>File</b>\n\n<code>{html.escape(filename)}</code></blockquote>",
         "",
-        f"┌ <b>{sb('Status')}</b>      <code>{html.escape(status_text)} ({pct:.2f}%)</code>",
-        f"├ <code>[{bar}]</code>",
-        "│",
-        f"├ <b>{sb('Speed')}</b>       <code>{fmt_bytes(speed_bps)}/s</code>",
-        f"├ <b>{sb('Progress')}</b>    <code>{done_str}</code> / <code>{total_str}</code>",
-        f"├ <b>{sb('ETA')}</b>         <code>{fmt_duration(eta_sec)}</code>  <i>({fmt_duration(elapsed_sec)})</i>",
-        "│",
-        f"├ <b>{sb('User')}</b>        {html.escape(uname)}  [<code>{html.escape(str(uid))}</code>]",
-        f"├ <b>{sb('Engine')}</b>      <code>{html.escape(engine)}</code>  •  #{mode_str}",
-        f"└ <b>{sb('Cancel')}</b>      /cancel_{html.escape(short_id)}",
+        f"Status  ·  <code>{html.escape(status_text)} ({pct:.2f}%)</code>",
+        f"<code>[{bar}]</code>",
+        "",
+        f"Speed  ·  <code>{fmt_bytes(speed_bps)}/s</code>",
+        f"Progress  ·  <code>{done_str} / {total_str}</code>",
+        f"ETA  ·  <code>{fmt_duration(eta_sec)}</code>  <i>({fmt_duration(elapsed_sec)})</i>",
+        "",
+        f"User  ·  {html.escape(uname)}  <code>[{html.escape(str(uid))}]</code>",
+        f"Engine  ·  <code>{html.escape(engine)}</code>  ·  #{mode_str}",
+        f"Stop  ·  /cancel_{html.escape(short_id)}",
         "",
         f"<pre><code class=\"language-SYSTEM\">{html.escape(sys_block)}</code></pre>",
     ]
-    return "\n".join(lines)
+    return "\n\n".join(line if line != "" else "" for line in lines).replace("\n\n\n\n", "\n\n").replace("\n\n\n", "\n\n")
 
 
 def status_keyboard(job_id: str) -> dict:
@@ -514,8 +495,8 @@ def main():
             if du_free < file_size * 1.15:
                 send_message(
                     chat_id,
-                    f"<blockquote><b>{sb('WORKSPACE NOTICE')}</b>\n"
-                    f"{sr('Remaining disk')} (<code>{fmt_bytes(du_free)}</code>) {sr('is tight for archive extraction. Uploading original file directly.')}</blockquote>",
+                    f"<blockquote><b>Workspace Notice</b>\n\n"
+                    f"Remaining disk (<code>{fmt_bytes(du_free)}</code>) is tight for archive extraction. Uploading original file directly.</blockquote>",
                 )
                 mode = "normal"
 
@@ -551,7 +532,7 @@ def main():
                 if tar_res.returncode != 0:
                     send_message(
                         chat_id,
-                        f"<blockquote><b>{sb('EXTRACTION NOTICE')}</b>\n{sr('Unsupported archive format. Uploading original file instead.')}</blockquote>",
+                        f"<blockquote><b>Extraction Notice</b>\n\nUnsupported archive format. Uploading original file instead.</blockquote>",
                     )
                     upload_target_path = downloaded_path
                     upload_is_dir = False
@@ -703,12 +684,12 @@ def main():
             uname = "@" + uname
 
         done_text = (
-            f"<blockquote><b>{sb('TRANSFER COMPLETE')}</b>\n"
+            f"<blockquote><b>Transfer Complete</b>\n\n"
             f"<code>{html.escape(cur_filename)}</code></blockquote>\n\n"
-            f"┌ <b>{sb('Size')}</b>         <code>{fmt_bytes(file_size)}</code>\n"
-            f"├ <b>{sb('Folder')}</b>       <code>{html.escape(folder_name)}</code>\n"
-            f"├ <b>{sb('Elapsed')}</b>      <code>{total_elapsed}</code>\n"
-            f"└ <b>{sb('User')}</b>         {html.escape(uname)}"
+            f"Size  ·  <code>{fmt_bytes(file_size)}</code>\n\n"
+            f"Folder  ·  <code>{html.escape(folder_name)}</code>\n\n"
+            f"Elapsed  ·  <code>{total_elapsed}</code>\n\n"
+            f"User  ·  {html.escape(uname)}"
         )
         done_kb = {
             "inline_keyboard": [
@@ -723,17 +704,17 @@ def main():
 
     except InterruptedError:
         cancel_text = (
-            f"<blockquote><b>{sb('TASK CANCELLED')}</b>\n"
+            f"<blockquote><b>Task Cancelled</b>\n\n"
             f"<code>{html.escape(job.get('detectedName') or 'Task')}</code></blockquote>\n\n"
-            f"└ <b>{sb('Task ID')}</b>   <code>{html.escape(JOB_ID)}</code>"
+            f"Task ID  ·  <code>{html.escape(JOB_ID)}</code>"
         )
         edit_status(chat_id, message_id, cancel_text)
         worker_call("/internal/complete", {"job_id": JOB_ID, "status": "cancelled"})
     except Exception as e:
         err_text = (
-            f"<blockquote><b>{sb('TRANSFER FAILED')}</b>\n"
+            f"<blockquote><b>Transfer Failed</b>\n\n"
             f"<code>{html.escape(job.get('detectedName') or 'Task')}</code></blockquote>\n\n"
-            f"└ <b>{sb('Reason')}</b>   <code>{html.escape(str(e)[:300])}</code>"
+            f"Reason  ·  <code>{html.escape(str(e)[:300])}</code>"
         )
         edit_status(chat_id, message_id, err_text)
         worker_call("/internal/complete", {"job_id": JOB_ID, "status": "failed", "error": str(e)})

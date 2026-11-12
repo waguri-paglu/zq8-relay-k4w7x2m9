@@ -1,10 +1,8 @@
 /**
  * Cloudflare Worker for Multi-User Telegram to Google Drive Mirror Bot
- * Refined UI Edition:
- * - Custom Unicode Sans-Serif & Small-Caps typography
- * - Native Telegram <blockquote> cards and <pre><code> aligned telemetry blocks
- * - Colored InlineKeyboardButtons (style: "success" | "primary" | "danger")
- * - Clean, breathable layout with minimal emoji usage
+ * - Clean native Telegram typography (lightweight, spacious, zero Unicode glyph clipping)
+ * - Native <blockquote> cards, <pre><code> telemetry containers, and colored buttons
+ * - Google Sans Flex (300/400/500 weights) on the OAuth Web callback page
  */
 
 export default {
@@ -33,34 +31,6 @@ export default {
     }
   }
 };
-
-// ============================================================================
-// CUSTOM TYPOGRAPHY HELPERS (Mathematical Sans-Serif Bold & Regular)
-// ============================================================================
-
-const SANS_BOLD_MAP = {
-  A:'𝗔',B:'𝗕',C:'𝗖',D:'𝗗',E:'𝗘',F:'𝗙',G:'𝗚',H:'𝗛',I:'𝗜',J:'𝗝',K:'𝗞',L:'𝗟',M:'𝗠',
-  N:'𝗡',O:'𝗢',P:'𝗣',Q:'𝗤',R:'𝗥',S:'𝗦',T:'𝗧',U:'𝗨',V:'𝗩',W:'𝗪',X:'𝗫',Y:'𝗬',Z:'𝗭',
-  a:'𝗮',b:'𝗯',c:'𝗰',d:'𝗱',e:'𝗲',f:'𝗳',g:'𝗴',h:'𝗵',i:'𝗶',j:'𝗷',k:'𝗸',l:'𝗹',m:'𝗺',
-  n:'𝗻',o:'𝗼',p:'𝗽',q:'𝗾',r:'𝗿',s:'𝘀',t:'𝘁',u:'𝘂',v:'𝘃',w:'𝘄',x:'𝘅',y:'𝘆',z:'𝘇',
-  '0':'𝟬','1':'𝟭','2':'𝟮','3':'𝟯','4':'𝟰','5':'𝟱','6':'𝟲','7':'𝟳','8':'𝟴','9':'𝟵'
-};
-
-const SANS_REG_MAP = {
-  A:'𝖠',B:'𝖡',C:'𝖢',D:'𝖣',E:'𝖤',F:'𝖥',G:'𝖦',H:'𝖧',I:'𝖨',J:'𝖩',K:'𝖪',L:'𝖫',M:'𝖬',
-  N:'𝖭',O:'𝖮',P:'𝖯',Q:'𝖰',R:'𝖱',S:'𝖲',T:'𝖳',U:'𝖴',V:'𝖵',W:'𝖶',X:'𝖷',Y:'𝖸',Z:'𝖹',
-  a:'𝖺',b:'𝖻',c:'𝖼',d:'𝖽',e:'𝖾',f:'𝖿',g:'𝗀',h:'𝗁',i:'𝗂',j:'𝗃',k:'𝗄',l:'𝗅',m:'𝗆',
-  n:'𝗇',o:'𝗈',p:'𝗉',q:'𝗊',r:'𝗋',s:'𝗌',t:'𝗍',u:'𝗎',v:'𝗏',w:'𝗐',x:'𝗑',y:'𝗒',z:'𝗓',
-  '0':'𝟢','1':'𝟣','2':'𝟤','3':'𝟥','4':'𝟦','5':'𝟧','6':'𝟨','7':'𝟩','8':'𝟪','9':'𝟫'
-};
-
-function sb(text) {
-  return String(text).split('').map(c => SANS_BOLD_MAP[c] || c).join('');
-}
-
-function sr(text) {
-  return String(text).split('').map(c => SANS_REG_MAP[c] || c).join('');
-}
 
 // ============================================================================
 // GOOGLE OAUTH2 & DRIVE API HELPERS
@@ -161,8 +131,8 @@ async function handleOAuthCallback(url, env) {
 
   await sendMessage(
     stateData.chatId,
-    `<blockquote><b>${sb('DRIVE CONNECTED')}</b>\n<code>${escapeHtml(email)}</code></blockquote>\n\n` +
-      `${sr('Select your default upload directory below:')}`,
+    `<blockquote><b>Drive Connected</b>\n\n<code>${escapeHtml(email)}</code></blockquote>\n\n` +
+      `Select your default upload directory below:`,
     env
   );
   await openFolderBrowser(stateData.chatId, stateData.userId, 'root', null, null, env);
@@ -231,7 +201,7 @@ async function saveUserProfile(userId, profile, env) {
 async function openFolderBrowser(chatId, userId, folderId, editMsgId = null, returnTaskId = null, env, page = 0) {
   const accessToken = await getValidAccessToken(userId, env);
   if (!accessToken) {
-    await sendMessage(chatId, `${sr('Please connect your Google Drive first using')} /login.`, env);
+    await sendMessage(chatId, `Please connect your Google Drive first using /login.`, env);
     return;
   }
 
@@ -324,11 +294,11 @@ async function openFolderBrowser(chatId, userId, folderId, editMsgId = null, ret
   const folderCount = items.filter(x => x.isFolder).length;
   const fileCount = items.length - folderCount;
   const headerText =
-    `<blockquote><b>${sb('DIRECTORY BROWSER')}</b>\n` +
+    `<blockquote><b>Directory Browser</b>\n\n` +
     `<code>${escapeHtml(folderName)}</code></blockquote>\n\n` +
-    `┌ <b>${ sb('Folders') }</b>   <code>${folderCount}</code>\n` +
-    `└ <b>${ sb('Files') }</b>     <code>${fileCount}</code>\n\n` +
-    `<i>${sr('Open a subfolder below or confirm this location.')}</i>`;
+    `Folders  ·  <code>${folderCount}</code>\n\n` +
+    `Files  ·  <code>${fileCount}</code>\n\n` +
+    `<i>Open a subfolder below or confirm this location.</i>`;
 
   const markup = { inline_keyboard: rows };
   if (editMsgId) {
@@ -351,17 +321,17 @@ function buildTaskMenuMessage(task) {
   if (task.mode === 'zip') modeLabel = 'Create ZIP Archive';
 
   const filterLine = task.selectFilter
-    ? `\n├ <b>${sb('Filter')}</b>       <code>${escapeHtml(task.selectFilter)}</code>`
+    ? `\n\nFilter  ·  <code>${escapeHtml(task.selectFilter)}</code>`
     : '';
 
   return (
-    `<blockquote><b>${sb('TARGET FILE')}</b>\n` +
+    `<blockquote><b>Target File</b>\n\n` +
     `<code>${escapeHtml(displayFileName)}</code></blockquote>\n\n` +
-    `┌ <b>${sb('Size')}</b>         <code>${sizeStr}</code>\n` +
-    `├ <b>${sb('Upload')}</b>       <code>${escapeHtml(task.folderName || 'My Drive')}</code>\n` +
-    `├ <b>${sb('Mode')}</b>         <code>${modeLabel}</code>${filterLine}\n` +
-    `└ <b>${sb('Timeout')}</b>      <code>2m 40s</code>\n\n` +
-    `<i>${sr('Configure task parameters below or press Start Mirror.')}</i>`
+    `Size  ·  <code>${sizeStr}</code>\n\n` +
+    `Upload  ·  <code>${escapeHtml(task.folderName || 'My Drive')}</code>\n\n` +
+    `Mode  ·  <code>${modeLabel}</code>${filterLine}\n\n` +
+    `Timeout  ·  <code>2m 40s</code>\n\n` +
+    `<i>Configure task options below or press Start Mirror.</i>`
   );
 }
 
@@ -419,7 +389,7 @@ async function handleTelegramUpdate(update, env) {
   if (promptRaw) {
     if (text === '/cancel') {
       await env.SETTINGS_KV.delete(`prompt:${userId}`);
-      await sendMessage(chatId, `<i>${sr('Input cancelled.')}</i>`, env);
+      await sendMessage(chatId, `<i>Input cancelled.</i>`, env);
       return;
     }
     const promptState = JSON.parse(promptRaw);
@@ -437,9 +407,9 @@ async function handleTelegramUpdate(update, env) {
     const authUrl = await createOAuthUrl(chatId, userId, username, env);
     await sendMessage(
       chatId,
-      `<blockquote><b>${sb('GOOGLE DRIVE AUTHENTICATION')}</b></blockquote>\n\n` +
-        `${sr('Authorize your Google Drive account so transfers upload directly to your storage.')}\n\n` +
-        `<i>${sr('If Google displays an unverified app prompt, select Advanced → Proceed.')}</i>`,
+      `<blockquote><b>Google Drive Authentication</b></blockquote>\n\n` +
+        `Authorize your Google Drive account so transfers upload directly to your storage.\n\n` +
+        `<i>If Google displays an unverified app prompt, select Advanced → Proceed.</i>`,
       env,
       { inline_keyboard: [[{ text: '▸  Connect Google Drive', url: authUrl, style: 'primary' }]] }
     );
@@ -448,7 +418,7 @@ async function handleTelegramUpdate(update, env) {
 
   if (text === '/logout') {
     await env.SETTINGS_KV.delete(`user:${userId}`);
-    await sendMessage(chatId, `<blockquote><b>${sb('DISCONNECTED')}</b>\n${sr('Your Google Drive credentials have been removed.')}</blockquote>`, env);
+    await sendMessage(chatId, `<blockquote><b>Disconnected</b>\n\nYour Google Drive credentials have been removed.</blockquote>`, env);
     return;
   }
 
@@ -458,7 +428,7 @@ async function handleTelegramUpdate(update, env) {
       const authUrl = await createOAuthUrl(chatId, userId, username, env);
       await sendMessage(
         chatId,
-        `${sr('Connect your Google Drive first before choosing a destination folder.')}`,
+        `Connect your Google Drive first before choosing a destination folder.`,
         env,
         { inline_keyboard: [[{ text: '▸  Connect Google Drive', url: authUrl, style: 'primary' }]] }
       );
@@ -471,7 +441,7 @@ async function handleTelegramUpdate(update, env) {
   if (text === '/settings') {
     const profile = await getUserProfile(userId, env);
     if (!profile) {
-      await sendMessage(chatId, `${sr('Please run')} /login ${sr('first.')}`, env);
+      await sendMessage(chatId, `Please run /login first.`, env);
       return;
     }
     await sendSettingsMenu(chatId, userId, profile, null, env);
@@ -492,7 +462,7 @@ async function handleTelegramUpdate(update, env) {
   const urlMatch = text.match(/https?:\/\/[^\s]+/i);
   if (!urlMatch) {
     if (text.startsWith('/m')) {
-      await sendMessage(chatId, `<b>${sb('Usage:')}</b>  <code>/m https://example.com/file.mkv</code>`, env);
+      await sendMessage(chatId, `Usage  ·  <code>/m https://example.com/file.mkv</code>`, env);
     }
     return;
   }
@@ -504,8 +474,8 @@ async function handleTelegramUpdate(update, env) {
     const authUrl = await createOAuthUrl(chatId, userId, username, env);
     await sendMessage(
       chatId,
-      `<blockquote><b>${sb('AUTHENTICATION REQUIRED')}</b></blockquote>\n\n` +
-        `${sr('Connect your Google Drive account to start mirroring files:')}`,
+      `<blockquote><b>Authentication Required</b></blockquote>\n\n` +
+        `Connect your Google Drive account to start mirroring files:`,
       env,
       { inline_keyboard: [[{ text: '▸  Connect Google Drive', url: authUrl, style: 'primary' }]] }
     );
@@ -514,7 +484,7 @@ async function handleTelegramUpdate(update, env) {
 
   const checkingMsg = await sendMessage(
     chatId,
-    `<blockquote><b>${sb('INSPECTING LINK')}</b>\n<i>${sr('Verifying stream headers & size...')}</i></blockquote>`,
+    `<blockquote><b>Inspecting Link</b>\n\n<i>Verifying stream headers and file size...</i></blockquote>`,
     env,
     null,
     msg.message_id
@@ -524,9 +494,9 @@ async function handleTelegramUpdate(update, env) {
   const verification = await verifyDirectLink(fileUrl);
   if (!verification.valid) {
     const errText =
-      `<blockquote><b>${sb('INVALID STREAM LINK')}</b></blockquote>\n\n` +
-      `┌ <b>${sb('Reason')}</b>   <code>${escapeHtml(verification.reason)}</code>\n` +
-      `└ <b>${sb('Action')}</b>   ${sr('Provide a direct file download URL.')}`;
+      `<blockquote><b>Invalid Stream Link</b></blockquote>\n\n` +
+      `Reason  ·  <code>${escapeHtml(verification.reason)}</code>\n\n` +
+      `Action  ·  Provide a direct file download URL.`;
     if (checkingMsgId) {
       await editMessage(chatId, checkingMsgId, errText, env);
     } else {
@@ -583,7 +553,7 @@ async function handleUserPromptInput(chatId, userId, text, promptState, env) {
   if (promptState.type === 'rename') {
     const raw = await env.SETTINGS_KV.get(`task:${promptState.taskId}`);
     if (!raw) {
-      await sendMessage(chatId, `<i>${sr('Task session expired.')}</i>`, env);
+      await sendMessage(chatId, `<i>Task session expired.</i>`, env);
       return;
     }
     const task = JSON.parse(raw);
@@ -593,7 +563,7 @@ async function handleUserPromptInput(chatId, userId, text, promptState, env) {
     if (task.menuMsgId) {
       await editMessage(chatId, task.menuMsgId, buildTaskMenuMessage(task), env, buildTaskMenuKeyboard(task));
     }
-    await sendMessage(chatId, `<b>${sb('Renamed:')}</b>  <code>${escapeHtml(task.customName)}</code>`, env);
+    await sendMessage(chatId, `Renamed  ·  <code>${escapeHtml(task.customName)}</code>`, env);
     return;
   }
 
@@ -610,8 +580,8 @@ async function handleUserPromptInput(chatId, userId, text, promptState, env) {
     await sendMessage(
       chatId,
       task.selectFilter
-        ? `<b>${sb('Extension Filter:')}</b>  <code>${escapeHtml(task.selectFilter)}</code>`
-        : `<b>${sb('Filter Cleared:')}</b>  ${sr('All extracted files will be uploaded.')}`,
+        ? `Extension Filter  ·  <code>${escapeHtml(task.selectFilter)}</code>`
+        : `Filter Cleared  ·  All extracted files will be uploaded.`,
       env
     );
     return;
@@ -620,7 +590,7 @@ async function handleUserPromptInput(chatId, userId, text, promptState, env) {
   if (promptState.type === 'mkdir') {
     const accessToken = await getValidAccessToken(userId, env);
     if (!accessToken) {
-      await sendMessage(chatId, `${sr('Please run')} /login ${sr('first.')}`, env);
+      await sendMessage(chatId, `Please run /login first.`, env);
       return;
     }
     const newFolderName = text.trim();
@@ -639,7 +609,7 @@ async function handleUserPromptInput(chatId, userId, text, promptState, env) {
     });
 
     if (!createRes.ok) {
-      await sendMessage(chatId, `<b>${sb('Error:')}</b> ${sr('Could not create folder on Google Drive.')}`, env);
+      await sendMessage(chatId, `Error  ·  Could not create folder on Google Drive.`, env);
       return;
     }
     const created = await createRes.json();
@@ -718,8 +688,8 @@ async function handleCallbackQuery(cb, env) {
       await answerCb(cb.id, 'Send new folder name', false, env);
       await sendMessage(
         chatId,
-        `<blockquote><b>${sb('NEW FOLDER')}</b>\n${sr('Parent:')} <code>${escapeHtml(bState.currentName)}</code></blockquote>\n\n` +
-          `${sr('Send the folder name now, or')} /cancel:`,
+        `<blockquote><b>New Folder</b>\n\nParent  ·  <code>${escapeHtml(bState.currentName)}</code></blockquote>\n\n` +
+          `Send the folder name now, or /cancel:`,
         env
       );
       return;
@@ -749,9 +719,9 @@ async function handleCallbackQuery(cb, env) {
       await editMessage(
         chatId,
         msgId,
-        `<blockquote><b>${sb('UPLOAD DIRECTORY UPDATED')}</b></blockquote>\n\n` +
-          `┌ <b>${sb('Destination')}</b>   <code>${escapeHtml(bState.currentName)}</code>\n` +
-          `└ <b>${sb('Change')}</b>        /setdldir`,
+        `<blockquote><b>Upload Directory Updated</b></blockquote>\n\n` +
+          `Destination  ·  <code>${escapeHtml(bState.currentName)}</code>\n\n` +
+          `Change  ·  /setdldir`,
         env
       );
       return;
@@ -780,7 +750,7 @@ async function handleCallbackQuery(cb, env) {
 
     if (action === 'tm_cancel') {
       await env.SETTINGS_KV.delete(`task:${tid}`);
-      await editMessage(chatId, msgId, `<blockquote><b>${sb('TASK CANCELLED')}</b></blockquote>`, env);
+      await editMessage(chatId, msgId, `<blockquote><b>Task Cancelled</b></blockquote>`, env);
       await answerCb(cb.id, 'Cancelled', false, env);
       return;
     }
@@ -816,8 +786,8 @@ async function handleCallbackQuery(cb, env) {
       await answerCb(cb.id, 'Send new file name', false, env);
       await sendMessage(
         chatId,
-        `<blockquote><b>${sb('RENAME FILE')}</b>\n<code>${escapeHtml(task.customName || task.detectedName)}</code></blockquote>\n\n` +
-          `${sr('Send the new filename (including extension), or')} /cancel:`,
+        `<blockquote><b>Rename File</b>\n\n<code>${escapeHtml(task.customName || task.detectedName)}</code></blockquote>\n\n` +
+          `Send the new filename (including extension), or /cancel:`,
         env
       );
       return;
@@ -832,8 +802,8 @@ async function handleCallbackQuery(cb, env) {
       await answerCb(cb.id, 'Send extension filter', false, env);
       await sendMessage(
         chatId,
-        `<blockquote><b>${sb('ARCHIVE EXTENSION FILTER')}</b></blockquote>\n\n` +
-          `${sr('Send comma-separated extensions to keep when extracting (e.g.')} <code>.mkv, .mp4, .srt</code>${sr(') or send')} <code>all</code>:`,
+        `<blockquote><b>Archive Extension Filter</b></blockquote>\n\n` +
+          `Send comma-separated extensions to keep when extracting (e.g. <code>.mkv, .mp4, .srt</code>) or send <code>all</code>:`,
         env
       );
       return;
@@ -847,12 +817,12 @@ async function handleCallbackQuery(cb, env) {
 
     if (action === 'tm_info') {
       const infoMsg =
-        `<blockquote><b>${sb('STREAM METADATA')}</b>\n` +
+        `<blockquote><b>Stream Metadata</b>\n\n` +
         `<code>${escapeHtml(task.detectedName)}</code></blockquote>\n\n` +
-        `┌ <b>${sb('Size')}</b>         <code>${fmtBytes(task.fileSize)}</code>\n` +
-        `├ <b>${sb('Bytes')}</b>        <code>${task.fileSize.toLocaleString()} B</code>\n` +
-        `├ <b>${sb('MIME')}</b>         <code>${escapeHtml(task.contentType)}</code>\n` +
-        `└ <b>${sb('Range I/O')}</b>    <code>${task.acceptRanges ? 'Supported (16x)' : 'Single Stream'}</code>`;
+        `Size  ·  <code>${fmtBytes(task.fileSize)}</code>\n\n` +
+        `Bytes  ·  <code>${task.fileSize.toLocaleString()} B</code>\n\n` +
+        `MIME  ·  <code>${escapeHtml(task.contentType)}</code>\n\n` +
+        `Range I/O  ·  <code>${task.acceptRanges ? 'Supported (16x)' : 'Single Stream'}</code>`;
       await editMessage(chatId, msgId, infoMsg, env, {
         inline_keyboard: [[{ text: '↩ Back to Options', callback_data: `tm_back:${tid}`, style: 'primary' }]]
       });
@@ -925,7 +895,7 @@ async function launchMirrorTask(task, env) {
     await editMessage(
       chatId,
       menuMsgId,
-      `<blockquote><b>${sb('SESSION EXPIRED')}</b>\n${sr('Please reconnect your Google Drive with')} /login.</blockquote>`,
+      `<blockquote><b>Session Expired</b>\n\nPlease reconnect your Google Drive with /login.</blockquote>`,
       env
     );
     return;
@@ -940,11 +910,11 @@ async function launchMirrorTask(task, env) {
   if (fileSize > 0 && quota && quota.free !== Infinity) {
     if (fileSize > quota.free) {
       const msg =
-        `<blockquote><b>${sb('INSUFFICIENT DRIVE STORAGE')}</b>\n` +
+        `<blockquote><b>Insufficient Drive Storage</b>\n\n` +
         `<code>${escapeHtml(task.customName || task.detectedName)}</code></blockquote>\n\n` +
-        `┌ <b>${sb('Required')}</b>     <code>${fmtBytes(fileSize)}</code>\n` +
-        `└ <b>${sb('Available')}</b>    <code>${fmtBytes(quota.free)}</code>\n\n` +
-        `<i>${sr('Free up space in your Google Drive and try again.')}</i>`;
+        `Required  ·  <code>${fmtBytes(fileSize)}</code>\n\n` +
+        `Available  ·  <code>${fmtBytes(quota.free)}</code>\n\n` +
+        `<i>Free up space in your Google Drive and try again.</i>`;
       await editMessage(chatId, menuMsgId, msg, env);
       return;
     }
@@ -953,8 +923,8 @@ async function launchMirrorTask(task, env) {
       const workspaceNeeded = fileSize * 2.1;
       if (workspaceNeeded > runnerLimitBytes) {
         fallbackNotice =
-          `<blockquote><b>${sb('WORKSPACE NOTICE')}</b>\n` +
-          `${sr('Archive processing needs')} <code>${fmtBytes(workspaceNeeded)}</code>. ${sr('Switching to direct upload.')}</blockquote>\n\n`;
+          `<blockquote><b>Workspace Notice</b>\n\n` +
+          `Archive processing needs <code>${fmtBytes(workspaceNeeded)}</code>. Switching to direct upload.</blockquote>\n\n`;
         task.mode = 'normal';
       }
     }
@@ -964,8 +934,8 @@ async function launchMirrorTask(task, env) {
     await editMessage(
       chatId,
       menuMsgId,
-      `<blockquote><b>${sb('CAPACITY LIMIT')}</b>\n` +
-        `${sr('File size')} (<code>${fmtBytes(fileSize)}</code>) ${sr('exceeds the 112 GiB runner workspace.')}</blockquote>`,
+      `<blockquote><b>Capacity Limit</b>\n\n` +
+        `File size (<code>${fmtBytes(fileSize)}</code>) exceeds the 112 GiB runner workspace.</blockquote>`,
       env
     );
     return;
@@ -976,20 +946,16 @@ async function launchMirrorTask(task, env) {
 
   const bootText =
     `${fallbackNotice}` +
-    `<blockquote><b>${sb('FILE')}</b>\n` +
+    `<blockquote><b>Transferring File</b>\n\n` +
     `<code>${escapeHtml(task.customName || task.detectedName)}</code></blockquote>\n\n` +
-    `┌ <b>${sb('Status')}</b>      <code>Initializing Runner.. (0.00%)</code>\n` +
-    `├ <code>[□□□□□□□□□□□□]</code>\n` +
-    `│\n` +
-    `├ <b>${sb('Size')}</b>        <code>${fileSize > 0 ? fmtBytes(fileSize) : 'Unknown'}</code>\n` +
-    `├ <b>${sb('Folder')}</b>      <code>${escapeHtml(task.folderName)}</code>\n` +
-    `├ <b>${sb('Drive Free')}</b>  <code>${freeDriveStr}</code>\n` +
-    `│\n` +
-    `├ <b>${sb('User')}</b>        @${escapeHtml(task.username)}  [<code>${userId}</code>]\n` +
-    `├ <b>${sb('Mode')}</b>        ${modeTag}\n` +
-    `└ <b>${sb('Cancel')}</b>      /cancel_${taskId}\n\n` +
-    `<pre><code class="language-SYSTEM">┌ 𝗦𝗬𝗦𝗧𝗘𝗠 𝗠𝗢𝗡𝗜𝗧𝗢𝗥\n` +
-    `└ Allocating dedicated cloud node (~10s)...</code></pre>`;
+    `Status  ·  <code>Initializing Runner (0.00%)</code>\n\n` +
+    `<code>[□□□□□□□□□□□□]</code>\n\n` +
+    `Size  ·  <code>${fileSize > 0 ? fmtBytes(fileSize) : 'Unknown'}</code>\n\n` +
+    `Folder  ·  <code>${escapeHtml(task.folderName)}</code>  ·  Drive Free  ·  <code>${freeDriveStr}</code>\n\n` +
+    `User  ·  @${escapeHtml(task.username)}  <code>[${userId}]</code>\n\n` +
+    `Mode  ·  ${modeTag}  ·  /cancel_${taskId}\n\n` +
+    `<pre><code class="language-SYSTEM">SYSTEM MONITOR\n\n` +
+    `Allocating dedicated cloud node (~10s)...</code></pre>`;
 
   await editMessage(chatId, menuMsgId, bootText, env, {
     inline_keyboard: [
@@ -1028,7 +994,7 @@ async function launchMirrorTask(task, env) {
     await editMessage(
       chatId,
       menuMsgId,
-      `<blockquote><b>${sb('DISPATCH ERROR')}</b>\n${sr('Could not trigger GitHub Actions runner.')}</blockquote>`,
+      `<blockquote><b>Dispatch Error</b>\n\nCould not trigger GitHub Actions runner.</blockquote>`,
       env
     );
   }
@@ -1125,7 +1091,7 @@ async function removeActiveJobForUser(userId, jobId, env) {
 async function cancelActiveJob(chatId, jobId, env) {
   const jRaw = await env.SETTINGS_KV.get(`job:${jobId}`);
   if (!jRaw) {
-    await sendMessage(chatId, `<i>${sr('Task')} <code>${escapeHtml(jobId)}</code> ${sr('is no longer active.')}</i>`, env);
+    await sendMessage(chatId, `<i>Task <code>${escapeHtml(jobId)}</code> is no longer active.</i>`, env);
     return;
   }
   const job = JSON.parse(jRaw);
@@ -1148,31 +1114,30 @@ async function cancelActiveJob(chatId, jobId, env) {
     );
   }
 
-  await sendMessage(chatId, `<b>${sb('Cancelling:')}</b>  <code>${escapeHtml(jobId)}</code>`, env);
+  await sendMessage(chatId, `Cancelling  ·  <code>${escapeHtml(jobId)}</code>`, env);
 }
 
 async function sendActiveTasks(chatId, userId, env) {
   const raw = await env.SETTINGS_KV.get(`active:${userId}`);
   const list = raw ? JSON.parse(raw) : [];
   if (!list.length) {
-    await sendMessage(chatId, `<blockquote><b>${sb('ACTIVE TASKS')}</b>\n<i>${sr('No transfers running right now.')}</i></blockquote>`, env);
+    await sendMessage(chatId, `<blockquote><b>Active Tasks</b>\n\n<i>No transfers running right now.</i></blockquote>`, env);
     return;
   }
 
-  const lines = [`<blockquote><b>${sb('ACTIVE TASKS')} (${list.length})</b></blockquote>\n`];
+  const lines = [`<blockquote><b>Active Tasks (${list.length})</b></blockquote>`];
   for (const jid of list) {
     const jr = await env.SETTINGS_KV.get(`job:${jid}`);
     if (jr) {
       const j = JSON.parse(jr);
       lines.push(
-        `┌ <b>${sb('File')}</b>      <code>${escapeHtml(j.customName || j.detectedName)}</code>\n` +
-        `├ <b>${sb('Size')}</b>      <code>${fmtBytes(j.fileSize)}</code>\n` +
-        `├ <b>${sb('State')}</b>     <code>${escapeHtml(j.status)}</code>\n` +
-        `└ <b>${sb('Stop')}</b>      /cancel_${jid}\n`
+        `File  ·  <code>${escapeHtml(j.customName || j.detectedName)}</code>\n\n` +
+        `Size  ·  <code>${fmtBytes(j.fileSize)}</code>  ·  State  ·  <code>${escapeHtml(j.status)}</code>\n\n` +
+        `Stop  ·  /cancel_${jid}`
       );
     }
   }
-  await sendMessage(chatId, lines.join('\n'), env);
+  await sendMessage(chatId, lines.join('\n\n'), env);
 }
 
 // ============================================================================
@@ -1184,13 +1149,13 @@ async function sendStartScreen(chatId, userId, username, env) {
   if (!profile || !profile.refreshToken) {
     const authUrl = await createOAuthUrl(chatId, userId, username, env);
     const text =
-      `<blockquote><b>${sb('CLOUD MIRROR ENGINE')}</b>\n` +
-      `${sr('High-Speed On-Demand Google Drive Transfer')}</blockquote>\n\n` +
-      `┌ <b>${sb('Bandwidth')}</b>   <code>Up to 1.8 Gbps (16x Aria2c)</code>\n` +
-      `├ <b>${sb('Workspace')}</b>   <code>115 GB Dedicated Node</code>\n` +
-      `├ <b>${sb('Features')}</b>    <code>Rename • Extract • ZIP • Browse</code>\n` +
-      `└ <b>${sb('Telemetry')}</b>   <code>2.5s Live Progress & System Stats</code>\n\n` +
-      `<i>${sr('Connect your Google Drive account below to begin:')}</i>`;
+      `<blockquote><b>Cloud Mirror Engine</b>\n\n` +
+      `High-Speed On-Demand Google Drive Transfer</blockquote>\n\n` +
+      `Bandwidth  ·  <code>Up to 1.8 Gbps (16x Aria2c)</code>\n\n` +
+      `Workspace  ·  <code>115 GB Dedicated Node</code>\n\n` +
+      `Features  ·  <code>Rename • Extract • ZIP • Browse</code>\n\n` +
+      `Telemetry  ·  <code>2.5s Live Progress & System Stats</code>\n\n` +
+      `<i>Connect your Google Drive account below to begin:</i>`;
     await sendMessage(chatId, text, env, {
       inline_keyboard: [[{ text: '▸  Connect Google Drive', url: authUrl, style: 'primary' }]]
     });
@@ -1198,16 +1163,16 @@ async function sendStartScreen(chatId, userId, username, env) {
   }
 
   const text =
-    `<blockquote><b>${sb('CLOUD MIRROR ENGINE')}</b>\n` +
+    `<blockquote><b>Cloud Mirror Engine</b>\n\n` +
     `<code>${escapeHtml(profile.email)}</code></blockquote>\n\n` +
-    `┌ <b>${sb('Upload Folder')}</b>   <code>${escapeHtml(profile.folderName || 'My Drive')}</code>\n` +
-    `└ <b>${sb('Options Menu')}</b>    <code>${profile.buttonMode !== false ? 'Enabled' : 'Disabled'}</code>\n\n` +
-    `<b>${sb('COMMANDS')}</b>\n` +
-    `• <code>/m &lt;link&gt;</code> — ${sr('Mirror any direct file link')}\n` +
-    `• /setdldir — ${sr('Browse & select target folder')}\n` +
-    `• /tasks — ${sr('View active transfers')}\n` +
-    `• /settings — ${sr('Preferences')}\n` +
-    `• /logout — ${sr('Unlink Google Drive')}`;
+    `Upload Folder  ·  <code>${escapeHtml(profile.folderName || 'My Drive')}</code>\n\n` +
+    `Options Menu  ·  <code>${profile.buttonMode !== false ? 'Enabled' : 'Disabled'}</code>\n\n` +
+    `<b>Commands</b>\n\n` +
+    `<code>/m &lt;link&gt;</code> — Mirror any direct file link\n\n` +
+    `/setdldir — Browse & select target folder\n\n` +
+    `/tasks — View active transfers\n\n` +
+    `/settings — Preferences\n\n` +
+    `/logout — Unlink Google Drive`;
 
   await sendMessage(chatId, text, env, {
     inline_keyboard: [
@@ -1221,10 +1186,10 @@ async function sendStartScreen(chatId, userId, username, env) {
 
 async function sendSettingsMenu(chatId, userId, profile, editMsgId, env) {
   const text =
-    `<blockquote><b>${sb('PREFERENCES')}</b>\n` +
+    `<blockquote><b>Preferences</b>\n\n` +
     `<code>${escapeHtml(profile.email)}</code></blockquote>\n\n` +
-    `┌ <b>${sb('Target Folder')}</b>   <code>${escapeHtml(profile.folderName || 'My Drive')}</code>\n` +
-    `└ <b>${sb('ButtonMode')}</b>      <code>${profile.buttonMode !== false ? 'Enabled' : 'Disabled'}</code>`;
+    `Target Folder  ·  <code>${escapeHtml(profile.folderName || 'My Drive')}</code>\n\n` +
+    `ButtonMode  ·  <code>${profile.buttonMode !== false ? 'Enabled' : 'Disabled'}</code>`;
   const kb = {
     inline_keyboard: [
       [{ text: 'Browse / Change Folder', callback_data: 'cfg_dir', style: 'primary' }],
@@ -1400,7 +1365,7 @@ function jsonResponse(obj, status = 200) {
 }
 
 function htmlResponse(title, bodyHtml) {
-  const page = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><style>body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#f8fafc;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:20px}.card{background:#1e293b;padding:32px;border-radius:16px;max-width:420px;text-align:center;box-shadow:0 10px 25px rgba(0,0,0,0.4)}h1{margin-top:0;color:#38bdf8;font-size:1.5rem}p{color:#cbd5e1;line-height:1.6}</style></head><body><div class="card"><h1>${escapeHtml(title)}</h1><p>${bodyHtml}</p></div></body></html>`;
+  const page = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Google+Sans+Flex:opsz,wght@6..144,300..600&display=swap" rel="stylesheet"><style>body{font-family:'Google Sans Flex',system-ui,-apple-system,sans-serif;font-weight:400;background:#0f172a;color:#f8fafc;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:20px}.card{background:#1e293b;padding:32px;border-radius:16px;max-width:420px;text-align:center;box-shadow:0 10px 25px rgba(0,0,0,0.4)}h1{margin-top:0;color:#38bdf8;font-size:1.45rem;font-weight:500}p{color:#cbd5e1;line-height:1.75;font-weight:300}</style></head><body><div class="card"><h1>${escapeHtml(title)}</h1><p>${bodyHtml}</p></div></body></html>`;
   return new Response(page, {
     status: 200,
     headers: { 'Content-Type': 'text/html; charset=utf-8' }
