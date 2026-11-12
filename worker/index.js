@@ -848,7 +848,13 @@ async function handleCallbackQuery(cb, env) {
     const [action, jobId] = data.split(':');
     if (action === 'st_close') {
       await deleteMessage(chatId, msgId, env);
-      await answerCb(cb.id, 'Closed', false, env);
+      const jr = await env.SETTINGS_KV.get(`job:${jobId}`);
+      if (jr) {
+        const job = JSON.parse(jr);
+        job.messageId = '';
+        await env.SETTINGS_KV.put(`job:${jobId}`, JSON.stringify(job), { expirationTtl: 25200 });
+      }
+      await answerCb(cb.id, 'Closed — use /tasks to reopen', false, env);
       return;
     }
     if (action === 'st_ref') {
@@ -1059,7 +1065,11 @@ async function handleInternalRunner(request, path, env) {
   }
 
   if (path === '/internal/job-status') {
-    return jsonResponse({ ok: true, cancelled: !!job.cancelled, status: job.status });
+    if (typeof body.last_card === 'string' && body.last_card.length > 0) {
+      job.lastCardHtml = body.last_card;
+      await env.SETTINGS_KV.put(`job:${jobId}`, JSON.stringify(job), { expirationTtl: 25200 });
+    }
+    return jsonResponse({ ok: true, cancelled: !!job.cancelled, status: job.status, messageId: job.messageId || '' });
   }
 
   if (path === '/internal/complete') {
@@ -1122,24 +1132,61 @@ async function cancelActiveJob(chatId, jobId, env) {
 async function sendActiveTasks(chatId, userId, env) {
   const raw = await env.SETTINGS_KV.get(`active:${userId}`);
   const list = raw ? JSON.parse(raw) : [];
-  if (!list.length) {
+  const activeJobs = [];
+  const keptIds = [];
+
+  for (const jid of list) {
+    const jr = await env.SETTINGS_KV.get(`job:${jid}`);
+    if (!jr) continue;
+    const j = JSON.parse(jr);
+    if (j.cancelled || ['completed', 'cancelled', 'failed'].includes(j.status)) continue;
+    keptIds.push(jid);
+    activeJobs.push([jid, j]);
+  }
+
+  if (keptIds.length !== list.length) {
+    await env.SETTINGS_KV.put(`active:${userId}`, JSON.stringify(keptIds), { expirationTtl: 25200 });
+  }
+
+  if (!activeJobs.length) {
     await sendMessage(chatId, `<blockquote><b>Active Tasks</b>\n\n<i>No transfers running right now.</i></blockquote>`, env);
     return;
   }
 
-  const lines = [`<blockquote><b>Active Tasks (${list.length})</b></blockquote>`];
-  for (const jid of list) {
-    const jr = await env.SETTINGS_KV.get(`job:${jid}`);
-    if (jr) {
-      const j = JSON.parse(jr);
-      lines.push(
-        `File  ·  <code>${escapeHtml(j.customName || j.detectedName)}</code>\n\n` +
-        `Size  ·  <code>${fmtBytes(j.fileSize)}</code>  ·  State  ·  ${escapeHtml(j.status)}\n\n` +
-        `Stop  ·  /cancel_${jid}`
-      );
+  for (const [jid, j] of activeJobs) {
+    if (j.messageId) {
+      await deleteMessage(chatId, j.messageId, env);
+    }
+
+    const name = escapeHtml(j.customName || j.detectedName || 'Task');
+    const state = escapeHtml(j.status || 'starting');
+    const userTag = j.username ? `@${escapeHtml(j.username)}` : `<code>${escapeHtml(String(j.userId || userId))}</code>`;
+    const folder = escapeHtml(j.folderName || 'My Drive');
+
+    const cardText = j.lastCardHtml || (
+      `<code>${name}</code>\n\n` +
+      `<b>Status  ·  ${state}</b>\n` +
+      `<code>[░░░░░░░░░░░░░░░░░░░░]</code>  <b><code>0.0%</code></b>\n` +
+      `Size  ·  <code>${fmtBytes(j.fileSize)}</code>\n` +
+      `Dest  ·  <code>${folder}</code>\n` +
+      `User  ·  ${userTag}  |  ID  ·  <code>${escapeHtml(String(j.userId || userId))}</code>\n` +
+      `Stop  ·  /cancel_${jid}\n\n` +
+      `<pre><code>SYSTEM\nLive card restored — awaiting next sync..</code></pre>`
+    );
+
+    const kb = {
+      inline_keyboard: [[
+        { text: '🔄 Refresh', callback_data: `st_ref:${jid}`, style: 'primary' },
+        { text: '🔽 Close', callback_data: `st_close:${jid}`, style: 'danger' },
+      ]],
+    };
+
+    const sent = await sendMessage(chatId, cardText, env, kb);
+    if (sent?.result?.message_id) {
+      j.messageId = String(sent.result.message_id);
+      await env.SETTINGS_KV.put(`job:${jid}`, JSON.stringify(j), { expirationTtl: 25200 });
     }
   }
-  await sendMessage(chatId, lines.join('\n\n'), env);
 }
 
 // ============================================================================

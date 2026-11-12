@@ -316,11 +316,21 @@ def aria2_rpc(method: str, params: list = None):
     return http_json("http://127.0.0.1:6800/jsonrpc", data=payload, timeout=5)
 
 
-def check_worker_cancelled(job_id: str) -> bool:
-    res = worker_call("/internal/job-status", {"job_id": job_id})
-    if res.get("cancelled"):
-        return True
-    return False
+def sync_worker_state(job_id: str, last_card: str = None):
+    payload = {"job_id": job_id}
+    if last_card:
+        payload["last_card"] = last_card
+    res = worker_call("/internal/job-status", payload)
+    cancelled = bool(res.get("cancelled"))
+    msg_id = str(res.get("messageId") or "") if "messageId" in res else None
+    return cancelled, msg_id
+
+
+def finish_status(chat_id, message_id, text: str, reply_markup: dict = None):
+    if message_id:
+        edit_status(chat_id, message_id, text, reply_markup)
+    elif chat_id:
+        send_message(chat_id, text, reply_markup)
 
 
 def write_rclone_conf(access_token: str):
@@ -442,7 +452,7 @@ def main():
             raise RuntimeError(f"Failed to start download in aria2c: {add_res}")
 
         last_edit = 0.0
-        last_cancel_check = 0.0
+        last_edit = 0.0
         cur_filename = custom_name or job.get("detectedName") or "Downloading..."
         total_len = 0
         done_len = 0
@@ -453,13 +463,6 @@ def main():
                 raise InterruptedError("Cancelled by user")
 
             now = time.time()
-            if now - last_cancel_check >= 5.0:
-                last_cancel_check = now
-                if check_worker_cancelled(JOB_ID):
-                    cancelled = True
-                    aria2_rpc("aria2.forceRemove", [gid])
-                    raise InterruptedError("Cancelled by user")
-
             st_res = aria2_rpc("aria2.tellStatus", [gid])
             st = st_res.get("result") or {}
             if st.get("followedBy"):
@@ -494,7 +497,15 @@ def main():
                     elapsed_sec=now - task_start,
                     sys_snap=snap,
                 )
-                edit_status(chat_id, message_id, card, status_keyboard(JOB_ID))
+                is_cancelled, synced_msg_id = sync_worker_state(JOB_ID, last_card=card)
+                if synced_msg_id is not None:
+                    message_id = synced_msg_id
+                if is_cancelled:
+                    cancelled = True
+                    aria2_rpc("aria2.forceRemove", [gid])
+                    raise InterruptedError("Cancelled by user")
+                if message_id:
+                    edit_status(chat_id, message_id, card, status_keyboard(JOB_ID))
 
             if status == "complete":
                 break
@@ -539,7 +550,13 @@ def main():
                 elapsed_sec=time.time() - task_start,
                 sys_snap=snap,
             )
-            edit_status(chat_id, message_id, card, status_keyboard(JOB_ID))
+            is_cancelled, synced_msg_id = sync_worker_state(JOB_ID, last_card=card)
+            if synced_msg_id is not None:
+                message_id = synced_msg_id
+            if is_cancelled:
+                raise InterruptedError("Cancelled by user")
+            if message_id:
+                edit_status(chat_id, message_id, card, status_keyboard(JOB_ID))
 
             base_stem = downloaded_path.stem
             for suffix in [".tar.gz", ".tar.bz2", ".tar.xz", ".tgz"]:
@@ -598,7 +615,13 @@ def main():
                 elapsed_sec=time.time() - task_start,
                 sys_snap=snap,
             )
-            edit_status(chat_id, message_id, card, status_keyboard(JOB_ID))
+            is_cancelled, synced_msg_id = sync_worker_state(JOB_ID, last_card=card)
+            if synced_msg_id is not None:
+                message_id = synced_msg_id
+            if is_cancelled:
+                raise InterruptedError("Cancelled by user")
+            if message_id:
+                edit_status(chat_id, message_id, card, status_keyboard(JOB_ID))
 
             zip_path = OUT_DIR / zip_name
             z_res = subprocess.run(
@@ -647,20 +670,12 @@ def main():
         )
 
         last_edit = 0.0
-        last_cancel_check = 0.0
         while rclone_proc.poll() is None:
             if cancelled:
                 rclone_proc.terminate()
                 raise InterruptedError("Cancelled by user")
 
             now = time.time()
-            if now - last_cancel_check >= 5.0:
-                last_cancel_check = now
-                if check_worker_cancelled(JOB_ID):
-                    cancelled = True
-                    rclone_proc.terminate()
-                    raise InterruptedError("Cancelled by user")
-
             if now - last_edit >= 2.5:
                 last_edit = now
                 rc_stats = http_json("http://127.0.0.1:5572/core/stats", data={}, timeout=3)
@@ -684,7 +699,15 @@ def main():
                     elapsed_sec=now - task_start,
                     sys_snap=snap,
                 )
-                edit_status(chat_id, message_id, card, status_keyboard(JOB_ID))
+                is_cancelled, synced_msg_id = sync_worker_state(JOB_ID, last_card=card)
+                if synced_msg_id is not None:
+                    message_id = synced_msg_id
+                if is_cancelled:
+                    cancelled = True
+                    rclone_proc.terminate()
+                    raise InterruptedError("Cancelled by user")
+                if message_id:
+                    edit_status(chat_id, message_id, card, status_keyboard(JOB_ID))
 
             time.sleep(1.0)
 
@@ -723,7 +746,10 @@ def main():
                 ]
             ]
         }
-        edit_status(chat_id, message_id, done_text, done_kb)
+        _, synced_msg_id = sync_worker_state(JOB_ID)
+        if synced_msg_id is not None:
+            message_id = synced_msg_id
+        finish_status(chat_id, message_id, done_text, done_kb)
         worker_call("/internal/complete", {"job_id": JOB_ID, "status": "completed", "drive_link": drive_link})
 
     except InterruptedError:
@@ -732,7 +758,10 @@ def main():
             f"<code>{html.escape(job.get('detectedName') or 'Task')}</code></blockquote>\n\n"
             f"Task ID  ·  <code>{html.escape(JOB_ID)}</code>"
         )
-        edit_status(chat_id, message_id, cancel_text)
+        _, synced_msg_id = sync_worker_state(JOB_ID)
+        if synced_msg_id is not None:
+            message_id = synced_msg_id
+        finish_status(chat_id, message_id, cancel_text)
         worker_call("/internal/complete", {"job_id": JOB_ID, "status": "cancelled"})
     except Exception as e:
         err_text = (
@@ -740,7 +769,10 @@ def main():
             f"<code>{html.escape(job.get('detectedName') or 'Task')}</code></blockquote>\n\n"
             f"Reason  ·  <code>{html.escape(str(e)[:300])}</code>"
         )
-        edit_status(chat_id, message_id, err_text)
+        _, synced_msg_id = sync_worker_state(JOB_ID)
+        if synced_msg_id is not None:
+            message_id = synced_msg_id
+        finish_status(chat_id, message_id, err_text)
         worker_call("/internal/complete", {"job_id": JOB_ID, "status": "failed", "error": str(e)})
         sys.exit(1)
     finally:
