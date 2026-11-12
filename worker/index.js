@@ -1,8 +1,8 @@
 /**
  * Cloudflare Worker for Multi-User Telegram to Google Drive Mirror Bot
- * - Clean native Telegram typography (lightweight, spacious, zero Unicode glyph clipping)
- * - Native <blockquote> cards, <pre><code> telemetry containers, and colored buttons
- * - Google Sans Flex (300/400/500 weights) on the OAuth Web callback page
+ * - Normal Roboto (native Telegram UI text) for prose, labels, and names
+ * - Monospace (<code> / <pre>) for filenames, metrics, commands, and system telemetry
+ * - Native <blockquote> cards, <pre><code> blocks, and colored InlineKeyboardButtons
  */
 
 export default {
@@ -295,10 +295,9 @@ async function openFolderBrowser(chatId, userId, folderId, editMsgId = null, ret
   const fileCount = items.length - folderCount;
   const headerText =
     `<blockquote><b>Directory Browser</b>\n\n` +
-    `<code>${escapeHtml(folderName)}</code></blockquote>\n\n` +
-    `Folders  ·  <code>${folderCount}</code>\n\n` +
-    `Files  ·  <code>${fileCount}</code>\n\n` +
-    `<i>Open a subfolder below or confirm this location.</i>`;
+    `${escapeHtml(folderName)}</blockquote>\n\n` +
+    `Folders  ·  <code>${folderCount}</code>    Files  ·  <code>${fileCount}</code>\n\n` +
+    `<i>Tap a subfolder to open it or confirm this location.</i>`;
 
   const markup = { inline_keyboard: rows };
   if (editMsgId) {
@@ -328,10 +327,10 @@ function buildTaskMenuMessage(task) {
     `<blockquote><b>Target File</b>\n\n` +
     `<code>${escapeHtml(displayFileName)}</code></blockquote>\n\n` +
     `Size  ·  <code>${sizeStr}</code>\n\n` +
-    `Upload  ·  <code>${escapeHtml(task.folderName || 'My Drive')}</code>\n\n` +
-    `Mode  ·  <code>${modeLabel}</code>${filterLine}\n\n` +
+    `Destination  ·  ${escapeHtml(task.folderName || 'My Drive')}\n\n` +
+    `Mode  ·  ${modeLabel}${filterLine}\n\n` +
     `Timeout  ·  <code>2m 40s</code>\n\n` +
-    `<i>Configure task options below or press Start Mirror.</i>`
+    `<i>Adjust options below or start the transfer.</i>`
   );
 }
 
@@ -720,8 +719,8 @@ async function handleCallbackQuery(cb, env) {
         chatId,
         msgId,
         `<blockquote><b>Upload Directory Updated</b></blockquote>\n\n` +
-          `Destination  ·  <code>${escapeHtml(bState.currentName)}</code>\n\n` +
-          `Change  ·  /setdldir`,
+          `Destination  ·  ${escapeHtml(bState.currentName)}\n\n` +
+          `Change anytime  ·  /setdldir`,
         env
       );
       return;
@@ -819,10 +818,9 @@ async function handleCallbackQuery(cb, env) {
       const infoMsg =
         `<blockquote><b>Stream Metadata</b>\n\n` +
         `<code>${escapeHtml(task.detectedName)}</code></blockquote>\n\n` +
-        `Size  ·  <code>${fmtBytes(task.fileSize)}</code>\n\n` +
-        `Bytes  ·  <code>${task.fileSize.toLocaleString()} B</code>\n\n` +
+        `Size  ·  <code>${fmtBytes(task.fileSize)}</code>  (<code>${task.fileSize.toLocaleString()} B</code>)\n\n` +
         `MIME  ·  <code>${escapeHtml(task.contentType)}</code>\n\n` +
-        `Range I/O  ·  <code>${task.acceptRanges ? 'Supported (16x)' : 'Single Stream'}</code>`;
+        `Range I/O  ·  ${task.acceptRanges ? 'Supported (16x parallel)' : 'Single Stream'}`;
       await editMessage(chatId, msgId, infoMsg, env, {
         inline_keyboard: [[{ text: '↩ Back to Options', callback_data: `tm_back:${tid}`, style: 'primary' }]]
       });
@@ -948,11 +946,11 @@ async function launchMirrorTask(task, env) {
     `${fallbackNotice}` +
     `<blockquote><b>Transferring File</b>\n\n` +
     `<code>${escapeHtml(task.customName || task.detectedName)}</code></blockquote>\n\n` +
-    `Status  ·  <code>Initializing Runner (0.00%)</code>\n\n` +
+    `Status  ·  Initializing Runner  <code>0.00%</code>\n\n` +
     `<code>[□□□□□□□□□□□□]</code>\n\n` +
     `Size  ·  <code>${fileSize > 0 ? fmtBytes(fileSize) : 'Unknown'}</code>\n\n` +
-    `Folder  ·  <code>${escapeHtml(task.folderName)}</code>  ·  Drive Free  ·  <code>${freeDriveStr}</code>\n\n` +
-    `User  ·  @${escapeHtml(task.username)}  <code>[${userId}]</code>\n\n` +
+    `Folder  ·  ${escapeHtml(task.folderName)}  ·  Free  ·  <code>${freeDriveStr}</code>\n\n` +
+    `User  ·  @${escapeHtml(task.username)}  <code>${userId}</code>\n\n` +
     `Mode  ·  ${modeTag}  ·  /cancel_${taskId}\n\n` +
     `<pre><code class="language-SYSTEM">SYSTEM MONITOR\n\n` +
     `Allocating dedicated cloud node (~10s)...</code></pre>`;
@@ -1132,7 +1130,7 @@ async function sendActiveTasks(chatId, userId, env) {
       const j = JSON.parse(jr);
       lines.push(
         `File  ·  <code>${escapeHtml(j.customName || j.detectedName)}</code>\n\n` +
-        `Size  ·  <code>${fmtBytes(j.fileSize)}</code>  ·  State  ·  <code>${escapeHtml(j.status)}</code>\n\n` +
+        `Size  ·  <code>${fmtBytes(j.fileSize)}</code>  ·  State  ·  ${escapeHtml(j.status)}\n\n` +
         `Stop  ·  /cancel_${jid}`
       );
     }
@@ -1151,10 +1149,10 @@ async function sendStartScreen(chatId, userId, username, env) {
     const text =
       `<blockquote><b>Cloud Mirror Engine</b>\n\n` +
       `High-Speed On-Demand Google Drive Transfer</blockquote>\n\n` +
-      `Bandwidth  ·  <code>Up to 1.8 Gbps (16x Aria2c)</code>\n\n` +
-      `Workspace  ·  <code>115 GB Dedicated Node</code>\n\n` +
-      `Features  ·  <code>Rename • Extract • ZIP • Browse</code>\n\n` +
-      `Telemetry  ·  <code>2.5s Live Progress & System Stats</code>\n\n` +
+      `Bandwidth  ·  Up to <code>1.8 Gbps</code> (16x Aria2c)\n\n` +
+      `Workspace  ·  <code>115 GiB</code> Dedicated Node\n\n` +
+      `Features  ·  Rename · Extract · ZIP · Folder Browser\n\n` +
+      `Telemetry  ·  <code>2.5s</code> Live Progress & System Stats\n\n` +
       `<i>Connect your Google Drive account below to begin:</i>`;
     await sendMessage(chatId, text, env, {
       inline_keyboard: [[{ text: '▸  Connect Google Drive', url: authUrl, style: 'primary' }]]
@@ -1165,8 +1163,8 @@ async function sendStartScreen(chatId, userId, username, env) {
   const text =
     `<blockquote><b>Cloud Mirror Engine</b>\n\n` +
     `<code>${escapeHtml(profile.email)}</code></blockquote>\n\n` +
-    `Upload Folder  ·  <code>${escapeHtml(profile.folderName || 'My Drive')}</code>\n\n` +
-    `Options Menu  ·  <code>${profile.buttonMode !== false ? 'Enabled' : 'Disabled'}</code>\n\n` +
+    `Upload Folder  ·  ${escapeHtml(profile.folderName || 'My Drive')}\n\n` +
+    `Options Menu  ·  ${profile.buttonMode !== false ? 'Enabled' : 'Disabled'}\n\n` +
     `<b>Commands</b>\n\n` +
     `<code>/m &lt;link&gt;</code> — Mirror any direct file link\n\n` +
     `/setdldir — Browse & select target folder\n\n` +
@@ -1188,8 +1186,8 @@ async function sendSettingsMenu(chatId, userId, profile, editMsgId, env) {
   const text =
     `<blockquote><b>Preferences</b>\n\n` +
     `<code>${escapeHtml(profile.email)}</code></blockquote>\n\n` +
-    `Target Folder  ·  <code>${escapeHtml(profile.folderName || 'My Drive')}</code>\n\n` +
-    `ButtonMode  ·  <code>${profile.buttonMode !== false ? 'Enabled' : 'Disabled'}</code>`;
+    `Target Folder  ·  ${escapeHtml(profile.folderName || 'My Drive')}\n\n` +
+    `ButtonMode  ·  ${profile.buttonMode !== false ? 'Enabled' : 'Disabled'}`;
   const kb = {
     inline_keyboard: [
       [{ text: 'Browse / Change Folder', callback_data: 'cfg_dir', style: 'primary' }],
@@ -1365,7 +1363,7 @@ function jsonResponse(obj, status = 200) {
 }
 
 function htmlResponse(title, bodyHtml) {
-  const page = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Google+Sans+Flex:opsz,wght@6..144,300..600&display=swap" rel="stylesheet"><style>body{font-family:'Google Sans Flex',system-ui,-apple-system,sans-serif;font-weight:400;background:#0f172a;color:#f8fafc;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:20px}.card{background:#1e293b;padding:32px;border-radius:16px;max-width:420px;text-align:center;box-shadow:0 10px 25px rgba(0,0,0,0.4)}h1{margin-top:0;color:#38bdf8;font-size:1.45rem;font-weight:500}p{color:#cbd5e1;line-height:1.75;font-weight:300}</style></head><body><div class="card"><h1>${escapeHtml(title)}</h1><p>${bodyHtml}</p></div></body></html>`;
+  const page = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400&family=Roboto:wght@300;400;500&display=swap" rel="stylesheet"><style>body{font-family:'Roboto',system-ui,-apple-system,sans-serif;font-weight:400;background:#0f172a;color:#f8fafc;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:20px}.card{background:#1e293b;padding:32px;border-radius:16px;max-width:420px;text-align:center;box-shadow:0 10px 25px rgba(0,0,0,0.4)}h1{margin-top:0;color:#38bdf8;font-size:1.45rem;font-weight:500}p{color:#cbd5e1;line-height:1.75;font-weight:300}code{font-family:'Roboto Mono',monospace}</style></head><body><div class="card"><h1>${escapeHtml(title)}</h1><p>${bodyHtml}</p></div></body></html>`;
   return new Response(page, {
     status: 200,
     headers: { 'Content-Type': 'text/html; charset=utf-8' }

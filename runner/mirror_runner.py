@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 On-Demand Gigabit Mirror Runner for GitHub Actions.
-- Clean native Telegram typography (lightweight, spacious, zero Unicode glyph clipping)
-- Native <blockquote> file cards & <pre><code class="language-SYSTEM"> aligned telemetry blocks
+- Normal Roboto (native Telegram UI text) for prose, labels, engines, and folder names
+- Monospace (<code> / <pre>) for filenames, numeric telemetry, progress bars, and system stats
 - Colored InlineKeyboardButtons (style: "primary" | "danger" | "success")
 """
 
@@ -241,26 +241,26 @@ def build_status_card(
 
     sys_block = (
         f"SYSTEM MONITOR\n\n"
-        f"CPU   [{cpu_bar}]  {sys_snap['cpu_pct']:5.1f}%\n\n"
-        f"RAM   [{ram_bar}]  {sys_snap['ram_pct']:5.1f}%\n\n"
-        f"DISK  [{disk_bar}]  {sys_snap['free_gb']:5.1f} GB free\n\n"
-        f"SPD   ↓ {sys_snap['rx_spd']:<12}  ↑ {sys_snap['tx_spd']}\n\n"
-        f"NET   ↓ {sys_snap['rx_tot']:<12}  ↑ {sys_snap['tx_tot']}\n\n"
-        f"UPT   {sys_snap['uptime']}"
+        f"CPU    [{cpu_bar}]  {sys_snap['cpu_pct']:5.1f}%\n"
+        f"RAM    [{ram_bar}]  {sys_snap['ram_pct']:5.1f}%\n"
+        f"DISK   [{disk_bar}]  {sys_snap['free_gb']:5.1f} GiB free\n\n"
+        f"SPD    ↓ {sys_snap['rx_spd']:<13} ↑ {sys_snap['tx_spd']}\n"
+        f"NET    ↓ {sys_snap['rx_tot']:<13} ↑ {sys_snap['tx_tot']}\n"
+        f"UPT    {sys_snap['uptime']}"
     )
 
     lines = [
-        f"<blockquote><b>File</b>\n\n<code>{html.escape(filename)}</code></blockquote>",
+        f"<blockquote><b>Transferring File</b>\n\n<code>{html.escape(filename)}</code></blockquote>",
         "",
-        f"Status  ·  <code>{html.escape(status_text)} ({pct:.2f}%)</code>",
+        f"Status  ·  {html.escape(status_text)}  <code>{pct:.2f}%</code>",
         f"<code>[{bar}]</code>",
         "",
         f"Speed  ·  <code>{fmt_bytes(speed_bps)}/s</code>",
         f"Progress  ·  <code>{done_str} / {total_str}</code>",
-        f"ETA  ·  <code>{fmt_duration(eta_sec)}</code>  <i>({fmt_duration(elapsed_sec)})</i>",
+        f"ETA  ·  <code>{fmt_duration(eta_sec)}</code>  <i>({fmt_duration(elapsed_sec)} elapsed)</i>",
         "",
-        f"User  ·  {html.escape(uname)}  <code>[{html.escape(str(uid))}]</code>",
-        f"Engine  ·  <code>{html.escape(engine)}</code>  ·  #{mode_str}",
+        f"User  ·  {html.escape(uname)}  <code>{html.escape(str(uid))}</code>",
+        f"Engine  ·  {html.escape(engine)}  ·  #{mode_str}",
         f"Stop  ·  /cancel_{html.escape(short_id)}",
         "",
         f"<pre><code class=\"language-SYSTEM\">{html.escape(sys_block)}</code></pre>",
@@ -687,7 +687,7 @@ def main():
             f"<blockquote><b>Transfer Complete</b>\n\n"
             f"<code>{html.escape(cur_filename)}</code></blockquote>\n\n"
             f"Size  ·  <code>{fmt_bytes(file_size)}</code>\n\n"
-            f"Folder  ·  <code>{html.escape(folder_name)}</code>\n\n"
+            f"Folder  ·  {html.escape(folder_name)}\n\n"
             f"Elapsed  ·  <code>{total_elapsed}</code>\n\n"
             f"User  ·  {html.escape(uname)}"
         )
