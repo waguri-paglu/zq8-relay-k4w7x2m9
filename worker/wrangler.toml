@@ -10,3 +10,11 @@ GITHUB_WORKFLOW = "mirror.yml"
 [[kv_namespaces]]
 binding = "SETTINGS_KV"
 id = "986025f566ad4cd996134e705723ff77"
+
+[[durable_objects.bindings]]
+name = "STATE_DO"
+class_name = "StateDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["StateDO"]

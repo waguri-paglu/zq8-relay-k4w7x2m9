@@ -957,6 +957,9 @@ class Mirror:
         self.sys_mon = SystemMonitor()
         self.task_start = time.time()
         self.last_tick = 0.0
+        self.last_sync = 0.0
+        self.last_card_sync = 0.0
+        self.last_sync_status = ""
         self.idx = 0
         self.aria_proc = None
         self.token_srv = None
@@ -1184,12 +1187,19 @@ class Mirror:
             sys_snap=self.sys_mon.snapshot(),
             batch_pos=(self.idx + 1, len(self.items)) if self.batch else None,
         )
-        is_cancelled, synced_msg_id = sync_worker_state(JOB_ID, last_card=card)
-        if synced_msg_id is not None:
-            self.message_id = synced_msg_id
-        if is_cancelled:
-            cancelled = True
-            raise InterruptedError("Cancelled by user")
+        status_changed = (status_text != self.last_sync_status)
+        need_card = force or status_changed or (now - self.last_card_sync >= 20.0)
+        if need_card or (now - self.last_sync >= 5.0):
+            self.last_sync = now
+            self.last_sync_status = status_text
+            if need_card:
+                self.last_card_sync = now
+            is_cancelled, synced_msg_id = sync_worker_state(JOB_ID, last_card=card if need_card else None)
+            if synced_msg_id is not None:
+                self.message_id = synced_msg_id
+            if is_cancelled:
+                cancelled = True
+                raise InterruptedError("Cancelled by user")
         if self.message_id:
             edit_status(self.chat_id, self.message_id, card, status_keyboard(JOB_ID))
 

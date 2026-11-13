@@ -5,6 +5,94 @@
  * - Native <blockquote> cards, <pre><code> blocks, and colored InlineKeyboardButtons
  */
 
+export class StateDO {
+  constructor(state) {
+    this.sql = state.storage.sql;
+    this.ready = false;
+  }
+
+  ensureSchema() {
+    if (this.ready) return;
+    this.sql.exec('CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL, exp INTEGER)');
+    this.ready = true;
+  }
+
+  async fetch(request) {
+    this.ensureSchema();
+    const url = new URL(request.url);
+    const now = Date.now();
+    if (request.method === 'GET') {
+      const k = url.searchParams.get('k') || '';
+      const rows = [...this.sql.exec('SELECT v, exp FROM kv WHERE k = ?', k)];
+      if (!rows.length) return new Response(null, { status: 404 });
+      const row = rows[0];
+      if (row.exp && row.exp <= now) {
+        this.sql.exec('DELETE FROM kv WHERE k = ?', k);
+        return new Response(null, { status: 404 });
+      }
+      return Response.json({ v: row.v });
+    }
+    if (request.method === 'POST') {
+      const { k, v, ttlSec } = await request.json();
+      const exp = ttlSec ? now + Number(ttlSec) * 1000 : null;
+      this.sql.exec('INSERT OR REPLACE INTO kv (k, v, exp) VALUES (?, ?, ?)', k, v, exp);
+      if (Math.random() < 0.02) {
+        this.sql.exec('DELETE FROM kv WHERE exp IS NOT NULL AND exp <= ?', now);
+      }
+      return Response.json({ ok: true });
+    }
+    if (request.method === 'DELETE') {
+      const k = url.searchParams.get('k') || '';
+      this.sql.exec('DELETE FROM kv WHERE k = ?', k);
+      return Response.json({ ok: true });
+    }
+    return new Response('Method Not Allowed', { status: 405 });
+  }
+}
+
+function getStore(env) {
+  if (!env.STATE_DO) return env.SETTINGS_KV;
+  const stub = env.STATE_DO.get(env.STATE_DO.idFromName('global'));
+  const persistentKey = (k) => k.startsWith('user:') || k.startsWith('history:') || k.startsWith('folder:');
+  return {
+    async get(k) {
+      const res = await stub.fetch(`https://state.do/kv?k=${encodeURIComponent(k)}`);
+      if (res.ok) {
+        const data = await res.json();
+        return data.v;
+      }
+      if (env.SETTINGS_KV && persistentKey(k)) {
+        const legacy = await env.SETTINGS_KV.get(k);
+        if (legacy !== null) {
+          await stub.fetch('https://state.do/kv', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ k, v: legacy, ttlSec: null })
+          }).catch(() => {});
+          return legacy;
+        }
+      }
+      return null;
+    },
+    async put(k, v, opts) {
+      const res = await stub.fetch('https://state.do/kv', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ k, v: String(v), ttlSec: opts?.expirationTtl || null })
+      });
+      if (!res.ok) {
+        throw new Error(`StateDO put failed (${res.status})`);
+      }
+    },
+    async delete(k) {
+      await stub.fetch(`https://state.do/kv?k=${encodeURIComponent(k)}`, { method: 'DELETE' });
+      if (env.SETTINGS_KV && persistentKey(k)) {
+        await env.SETTINGS_KV.delete(k).catch(() => {});
+      }
+    }
+  };
+}
+
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
 const RUNNER_LIMIT_BYTES = 112 * 1024 * 1024 * 1024;
 const MAX_BATCH_URLS = 50;
@@ -129,7 +217,7 @@ function getWorkerBaseUrl(env) {
 
 async function createOAuthUrl(chatId, userId, username, env) {
   const state = crypto.randomUUID().replace(/-/g, '').slice(0, 20);
-  await env.SETTINGS_KV.put(
+  await getStore(env).put(
     `oauth_state:${state}`,
     JSON.stringify({ chatId, userId, username, createdAt: Date.now() }),
     { expirationTtl: 1800 }
@@ -161,11 +249,11 @@ async function handleOAuthCallback(url, env) {
     return htmlResponse('Invalid Request', 'Missing OAuth code or state parameter.');
   }
 
-  const stateRaw = await env.SETTINGS_KV.get(`oauth_state:${state}`);
+  const stateRaw = await getStore(env).get(`oauth_state:${state}`);
   if (!stateRaw) {
     return htmlResponse('Session Expired', 'This authorization link has expired. Run /login again in Telegram.');
   }
-  await env.SETTINGS_KV.delete(`oauth_state:${state}`);
+  await getStore(env).delete(`oauth_state:${state}`);
   const stateData = JSON.parse(stateRaw);
 
   const redirectUri = `${getWorkerBaseUrl(env)}/oauth/callback`;
@@ -283,7 +371,7 @@ async function getDriveQuota(accessToken) {
 }
 
 async function getUserProfile(userId, env) {
-  const raw = await env.SETTINGS_KV.get(`user:${userId}`);
+  const raw = await getStore(env).get(`user:${userId}`);
   return raw ? JSON.parse(raw) : null;
 }
 
@@ -312,7 +400,7 @@ function getEffectiveProfile(userId, stored) {
 }
 
 async function saveUserProfile(userId, profile, env) {
-  await env.SETTINGS_KV.put(`user:${userId}`, JSON.stringify(profile));
+  await getStore(env).put(`user:${userId}`, JSON.stringify(profile));
 }
 
 function friendlyDriveError(text) {
@@ -491,7 +579,7 @@ async function renderFolderBrowserPage(chatId, userId, browserState, page, editM
   const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
   const safePage = Math.max(0, Math.min(page, totalPages - 1));
   browserState.page = safePage;
-  await env.SETTINGS_KV.put(`browser:${userId}`, JSON.stringify(browserState), { expirationTtl: 3600 });
+  await getStore(env).put(`browser:${userId}`, JSON.stringify(browserState), { expirationTtl: 3600 });
 
   const pageItems = items.slice(safePage * pageSize, (safePage + 1) * pageSize);
   const rows = [];
@@ -826,15 +914,15 @@ async function handleTelegramUpdate(update, env) {
   if (!rawText) return;
   const text = rawText.trim();
 
-  const promptRaw = await env.SETTINGS_KV.get(`prompt:${userId}`);
+  const promptRaw = await getStore(env).get(`prompt:${userId}`);
   if (promptRaw) {
     if (text === '/cancel') {
-      await env.SETTINGS_KV.delete(`prompt:${userId}`);
+      await getStore(env).delete(`prompt:${userId}`);
       await sendMessage(chatId, `<i>Input cancelled.</i>`, env);
       return;
     }
     const promptState = JSON.parse(promptRaw);
-    await env.SETTINGS_KV.delete(`prompt:${userId}`);
+    await getStore(env).delete(`prompt:${userId}`);
     await handleUserPromptInput(chatId, userId, text, promptState, msg.message_id, env);
     return;
   }
@@ -858,7 +946,7 @@ async function handleTelegramUpdate(update, env) {
   }
 
   if (text === '/logout') {
-    await env.SETTINGS_KV.delete(`user:${userId}`);
+    await getStore(env).delete(`user:${userId}`);
     await sendMessage(
       chatId,
       `<blockquote><b>Disconnected</b>\n\nYour Google Drive credentials have been removed. You can still mirror to Gofile (temporary guest storage) anytime.</blockquote>`,
@@ -1000,6 +1088,7 @@ async function startTaskFromUrls(chatId, userId, username, replyToMsgId, urls, e
   const taskId = crypto.randomUUID().replace(/-/g, '').slice(0, 12);
   let task;
 
+  try {
   if (!isBatch) {
     const rawUrl = urls[0];
     let ytdlUrl = (forceYtdl || isMediaSiteUrl(rawUrl)) ? rawUrl : '';
@@ -1018,7 +1107,7 @@ async function startTaskFromUrls(chatId, userId, username, replyToMsgId, urls, e
           `Reason  ·  <code>${escapeHtml(resolved.reason)}</code>\n\n` +
           `Action  ·  Provide a direct file URL, supported host page, or try media mode (<code>/yt</code>).`;
         const retryId = crypto.randomUUID().replace(/-/g, '').slice(0, 10);
-        await env.SETTINGS_KV.put(
+        await getStore(env).put(
           `retry:${retryId}`,
           JSON.stringify({ url: rawUrl, userId, replyToMsgId }),
           { expirationTtl: 600 }
@@ -1202,7 +1291,7 @@ async function startTaskFromUrls(chatId, userId, username, replyToMsgId, urls, e
     };
   }
 
-  await env.SETTINGS_KV.put(`task:${taskId}`, JSON.stringify(task), { expirationTtl: 7200 });
+  await getStore(env).put(`task:${taskId}`, JSON.stringify(task), { expirationTtl: 7200 });
 
   if (profile.buttonMode === false) {
     await launchMirrorTask(task, env);
@@ -1217,7 +1306,17 @@ async function startTaskFromUrls(chatId, userId, username, replyToMsgId, urls, e
   } else {
     const sent = await sendMessage(chatId, menuText, env, menuKb, replyToMsgId);
     task.menuMsgId = sent?.result?.message_id;
-    await env.SETTINGS_KV.put(`task:${taskId}`, JSON.stringify(task), { expirationTtl: 7200 });
+    await getStore(env).put(`task:${taskId}`, JSON.stringify(task), { expirationTtl: 7200 });
+  }
+  } catch (err) {
+    const failText =
+      `<blockquote><b>Link Inspection Failed</b></blockquote>\n\n` +
+      `Reason  ·  <code>${escapeHtml(err?.message || String(err))}</code>`;
+    if (checkingMsgId) {
+      await editMessage(chatId, checkingMsgId, failText, env).catch(() => {});
+    } else {
+      await sendMessage(chatId, failText, env, null, replyToMsgId).catch(() => {});
+    }
   }
 }
 
@@ -1227,7 +1326,7 @@ async function startTaskFromUrls(chatId, userId, username, replyToMsgId, urls, e
 
 async function handleUserPromptInput(chatId, userId, text, promptState, msgId, env) {
   if (promptState.type === 'rename') {
-    const raw = await env.SETTINGS_KV.get(`task:${promptState.taskId}`);
+    const raw = await getStore(env).get(`task:${promptState.taskId}`);
     if (!raw) {
       await sendMessage(chatId, `<i>Task session expired.</i>`, env);
       return;
@@ -1241,7 +1340,7 @@ async function handleUserPromptInput(chatId, userId, text, promptState, msgId, e
         task.duplicateExists = existing.length > 0;
       }
     }
-    await env.SETTINGS_KV.put(`task:${task.taskId}`, JSON.stringify(task), { expirationTtl: 7200 });
+    await getStore(env).put(`task:${task.taskId}`, JSON.stringify(task), { expirationTtl: 7200 });
 
     if (task.menuMsgId) {
       await editMessage(chatId, task.menuMsgId, buildTaskMenuMessage(task), env, buildTaskMenuKeyboard(task));
@@ -1251,11 +1350,11 @@ async function handleUserPromptInput(chatId, userId, text, promptState, msgId, e
   }
 
   if (promptState.type === 'select_filter') {
-    const raw = await env.SETTINGS_KV.get(`task:${promptState.taskId}`);
+    const raw = await getStore(env).get(`task:${promptState.taskId}`);
     if (!raw) return;
     const task = JSON.parse(raw);
     task.selectFilter = text.toLowerCase() === 'all' ? '' : text.trim();
-    await env.SETTINGS_KV.put(`task:${task.taskId}`, JSON.stringify(task), { expirationTtl: 7200 });
+    await getStore(env).put(`task:${task.taskId}`, JSON.stringify(task), { expirationTtl: 7200 });
 
     if (task.menuMsgId) {
       await editMessage(chatId, task.menuMsgId, buildTaskMenuMessage(task), env, buildTaskMenuKeyboard(task));
@@ -1271,7 +1370,7 @@ async function handleUserPromptInput(chatId, userId, text, promptState, msgId, e
   }
 
   if (promptState.type === 'archive_password') {
-    const raw = await env.SETTINGS_KV.get(`task:${promptState.taskId}`);
+    const raw = await getStore(env).get(`task:${promptState.taskId}`);
     if (!raw) {
       await sendMessage(chatId, `<i>Task session expired.</i>`, env);
       return;
@@ -1279,7 +1378,7 @@ async function handleUserPromptInput(chatId, userId, text, promptState, msgId, e
     const task = JSON.parse(raw);
     const clear = text.toLowerCase() === 'clear' || text.toLowerCase() === 'none';
     task.archivePassword = clear ? '' : text;
-    await env.SETTINGS_KV.put(`task:${task.taskId}`, JSON.stringify(task), { expirationTtl: 7200 });
+    await getStore(env).put(`task:${task.taskId}`, JSON.stringify(task), { expirationTtl: 7200 });
     await deleteMessage(chatId, msgId, env);
 
     if (task.menuMsgId) {
@@ -1294,7 +1393,7 @@ async function handleUserPromptInput(chatId, userId, text, promptState, msgId, e
   }
 
   if (promptState.type === 'yt_sublang' || promptState.type === 'yt_plitems' || promptState.type === 'yt_trim') {
-    const raw = await env.SETTINGS_KV.get(`task:${promptState.taskId}`);
+    const raw = await getStore(env).get(`task:${promptState.taskId}`);
     if (!raw) {
       await sendMessage(chatId, `<i>Task session expired.</i>`, env);
       return;
@@ -1325,7 +1424,7 @@ async function handleUserPromptInput(chatId, userId, text, promptState, msgId, e
       }
     }
 
-    await env.SETTINGS_KV.put(`task:${task.taskId}`, JSON.stringify(task), { expirationTtl: 7200 });
+    await getStore(env).put(`task:${task.taskId}`, JSON.stringify(task), { expirationTtl: 7200 });
     if (task.menuMsgId) {
       await editMessage(chatId, task.menuMsgId, buildTaskMenuMessage(task), env, buildTaskMenuKeyboard(task));
     }
@@ -1374,7 +1473,7 @@ async function handleCallbackQuery(cb, env) {
   const data = cb.data || '';
 
   if (data.startsWith('fb_')) {
-    const bRaw = await env.SETTINGS_KV.get(`browser:${userId}`);
+    const bRaw = await getStore(env).get(`browser:${userId}`);
     if (!bRaw && data !== 'fb_close') {
       await answerCb(cb.id, 'Session expired. Run /setdldir again.', true, env);
       return;
@@ -1421,7 +1520,7 @@ async function handleCallbackQuery(cb, env) {
       return;
     }
     if (data === 'fb_mkdir') {
-      await env.SETTINGS_KV.put(
+      await getStore(env).put(
         `prompt:${userId}`,
         JSON.stringify({
           type: 'mkdir',
@@ -1449,7 +1548,7 @@ async function handleCallbackQuery(cb, env) {
       }
 
       if (bState.returnTaskId) {
-        const tRaw = await env.SETTINGS_KV.get(`task:${bState.returnTaskId}`);
+        const tRaw = await getStore(env).get(`task:${bState.returnTaskId}`);
         if (tRaw) {
           const task = JSON.parse(tRaw);
           if (String(task.userId) === String(userId)) {
@@ -1466,7 +1565,7 @@ async function handleCallbackQuery(cb, env) {
                 task.duplicateExists = ex.length > 0;
               }
             }
-            await env.SETTINGS_KV.put(`task:${task.taskId}`, JSON.stringify(task), { expirationTtl: 7200 });
+            await getStore(env).put(`task:${task.taskId}`, JSON.stringify(task), { expirationTtl: 7200 });
             await answerCb(cb.id, `Folder: ${bState.currentName}`, false, env);
             await editMessage(chatId, msgId, buildTaskMenuMessage(task), env, buildTaskMenuKeyboard(task));
             return;
@@ -1487,7 +1586,7 @@ async function handleCallbackQuery(cb, env) {
     }
     if (data.startsWith('fb_back:')) {
       const tid = data.split(':')[1];
-      const tRaw = await env.SETTINGS_KV.get(`task:${tid}`);
+      const tRaw = await getStore(env).get(`task:${tid}`);
       if (tRaw) {
         const task = JSON.parse(tRaw);
         if (String(task.userId) === String(userId)) {
@@ -1501,7 +1600,7 @@ async function handleCallbackQuery(cb, env) {
 
   if (data.startsWith('tm_try_yt:')) {
     const retryId = data.split(':')[1];
-    const rRaw = await env.SETTINGS_KV.get(`retry:${retryId}`);
+    const rRaw = await getStore(env).get(`retry:${retryId}`);
     if (!rRaw) {
       await answerCb(cb.id, 'Link expired. Send the URL with /yt.', true, env);
       return;
@@ -1511,7 +1610,7 @@ async function handleCallbackQuery(cb, env) {
       await answerCb(cb.id, 'You can only retry your own link.', true, env);
       return;
     }
-    await env.SETTINGS_KV.delete(`retry:${retryId}`);
+    await getStore(env).delete(`retry:${retryId}`);
     await answerCb(cb.id, 'Switching to yt-dlp mode...', false, env);
     const uname = cb.from.username || cb.from.first_name || 'User';
     await startTaskFromUrls(chatId, userId, uname, rData.replyToMsgId || msgId, [rData.url], env, { forceYtdl: true, editMsgId: msgId });
@@ -1524,7 +1623,7 @@ async function handleCallbackQuery(cb, env) {
     const tid = parts[1];
     const arg = parts[2];
 
-    const tRaw = await env.SETTINGS_KV.get(`task:${tid}`);
+    const tRaw = await getStore(env).get(`task:${tid}`);
     if (!tRaw) {
       await answerCb(cb.id, 'Task session expired.', true, env);
       return;
@@ -1537,7 +1636,7 @@ async function handleCallbackQuery(cb, env) {
     task.menuMsgId = msgId;
 
     if (action === 'tm_cancel') {
-      await env.SETTINGS_KV.delete(`task:${tid}`);
+      await getStore(env).delete(`task:${tid}`);
       await editMessage(chatId, msgId, `<blockquote><b>Task Cancelled</b></blockquote>`, env);
       await answerCb(cb.id, 'Cancelled', false, env);
       return;
@@ -1558,7 +1657,7 @@ async function handleCallbackQuery(cb, env) {
 
     if (action === 'tm_ytqset' && YT_QUALITY_LABELS[arg]) {
       task.ytQuality = arg;
-      await env.SETTINGS_KV.put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
+      await getStore(env).put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
       await editMessage(chatId, msgId, buildTaskMenuMessage(task), env, buildTaskMenuKeyboard(task));
       await answerCb(cb.id, `Quality: ${ytQualityLabel(arg)}`, false, env);
       return;
@@ -1567,7 +1666,7 @@ async function handleCallbackQuery(cb, env) {
     if (action === 'tm_ytcont') {
       const curIdx = YT_CONTAINERS.indexOf(task.ytContainer || 'mp4');
       task.ytContainer = YT_CONTAINERS[(curIdx + 1) % YT_CONTAINERS.length];
-      await env.SETTINGS_KV.put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
+      await getStore(env).put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
       await editMessage(chatId, msgId, buildTaskMenuMessage(task), env, buildTaskMenuKeyboard(task));
       await answerCb(cb.id, `Container: ${ytContainerLabel(task.ytContainer)}`, false, env);
       return;
@@ -1575,14 +1674,14 @@ async function handleCallbackQuery(cb, env) {
 
     if (action === 'tm_ytsubs') {
       task.ytSubs = !task.ytSubs;
-      await env.SETTINGS_KV.put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
+      await getStore(env).put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
       await editMessage(chatId, msgId, buildTaskMenuMessage(task), env, buildTaskMenuKeyboard(task));
       await answerCb(cb.id, `Subtitles: ${task.ytSubs ? 'ON' : 'OFF'}`, false, env);
       return;
     }
 
     if (action === 'tm_ytslang') {
-      await env.SETTINGS_KV.put(
+      await getStore(env).put(
         `prompt:${userId}`,
         JSON.stringify({ type: 'yt_sublang', taskId: tid }),
         { expirationTtl: 600 }
@@ -1599,7 +1698,7 @@ async function handleCallbackQuery(cb, env) {
 
     if (action === 'tm_ytmeta') {
       task.ytMeta = task.ytMeta === false;
-      await env.SETTINGS_KV.put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
+      await getStore(env).put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
       await editMessage(chatId, msgId, buildTaskMenuMessage(task), env, buildTaskMenuKeyboard(task));
       await answerCb(cb.id, `Metadata & Thumb: ${task.ytMeta ? 'ON' : 'OFF'}`, false, env);
       return;
@@ -1607,7 +1706,7 @@ async function handleCallbackQuery(cb, env) {
 
     if (action === 'tm_ytsb') {
       task.ytSponsorBlock = !task.ytSponsorBlock;
-      await env.SETTINGS_KV.put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
+      await getStore(env).put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
       await editMessage(chatId, msgId, buildTaskMenuMessage(task), env, buildTaskMenuKeyboard(task));
       await answerCb(cb.id, `SponsorBlock: ${task.ytSponsorBlock ? 'ON' : 'OFF'}`, false, env);
       return;
@@ -1615,14 +1714,14 @@ async function handleCallbackQuery(cb, env) {
 
     if (action === 'tm_ytpl') {
       task.ytPlaylist = task.ytPlaylist === 'all' ? 'single' : 'all';
-      await env.SETTINGS_KV.put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
+      await getStore(env).put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
       await editMessage(chatId, msgId, buildTaskMenuMessage(task), env, buildTaskMenuKeyboard(task));
       await answerCb(cb.id, `Playlist: ${task.ytPlaylist === 'all' ? 'All Items' : 'Single Video'}`, false, env);
       return;
     }
 
     if (action === 'tm_ytplitems') {
-      await env.SETTINGS_KV.put(
+      await getStore(env).put(
         `prompt:${userId}`,
         JSON.stringify({ type: 'yt_plitems', taskId: tid }),
         { expirationTtl: 600 }
@@ -1638,7 +1737,7 @@ async function handleCallbackQuery(cb, env) {
     }
 
     if (action === 'tm_yttrim') {
-      await env.SETTINGS_KV.put(
+      await getStore(env).put(
         `prompt:${userId}`,
         JSON.stringify({ type: 'yt_trim', taskId: tid }),
         { expirationTtl: 600 }
@@ -1655,7 +1754,7 @@ async function handleCallbackQuery(cb, env) {
 
     if (action === 'tm_ext') {
       task.mode = task.mode === 'extract' ? 'normal' : 'extract';
-      await env.SETTINGS_KV.put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
+      await getStore(env).put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
       await editMessage(chatId, msgId, buildTaskMenuMessage(task), env, buildTaskMenuKeyboard(task));
       await answerCb(cb.id, `Extract: ${task.mode === 'extract' ? 'ON' : 'OFF'}`, false, env);
       return;
@@ -1663,7 +1762,7 @@ async function handleCallbackQuery(cb, env) {
 
     if (action === 'tm_zip') {
       task.mode = task.mode === 'zip' ? 'normal' : 'zip';
-      await env.SETTINGS_KV.put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
+      await getStore(env).put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
       await editMessage(chatId, msgId, buildTaskMenuMessage(task), env, buildTaskMenuKeyboard(task));
       await answerCb(cb.id, `Create ZIP: ${task.mode === 'zip' ? 'ON' : 'OFF'}`, false, env);
       return;
@@ -1671,7 +1770,7 @@ async function handleCallbackQuery(cb, env) {
 
     if (action === 'tm_share') {
       task.share = !task.share;
-      await env.SETTINGS_KV.put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
+      await getStore(env).put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
       await editMessage(chatId, msgId, buildTaskMenuMessage(task), env, buildTaskMenuKeyboard(task));
       await answerCb(cb.id, `Share Link: ${task.share ? 'ON' : 'OFF'}`, false, env);
       return;
@@ -1686,14 +1785,14 @@ async function handleCallbackQuery(cb, env) {
 
     if (action === 'tm_confset' && ['rename', 'overwrite', 'skip'].includes(arg)) {
       task.conflict = arg;
-      await env.SETTINGS_KV.put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
+      await getStore(env).put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
       await editMessage(chatId, msgId, buildTaskMenuMessage(task), env, buildTaskMenuKeyboard(task));
       await answerCb(cb.id, `Duplicate: ${conflictLabel(arg)}`, false, env);
       return;
     }
 
     if (action === 'tm_ren') {
-      await env.SETTINGS_KV.put(
+      await getStore(env).put(
         `prompt:${userId}`,
         JSON.stringify({ type: 'rename', taskId: tid }),
         { expirationTtl: 600 }
@@ -1709,7 +1808,7 @@ async function handleCallbackQuery(cb, env) {
     }
 
     if (action === 'tm_sel') {
-      await env.SETTINGS_KV.put(
+      await getStore(env).put(
         `prompt:${userId}`,
         JSON.stringify({ type: 'select_filter', taskId: tid }),
         { expirationTtl: 600 }
@@ -1725,7 +1824,7 @@ async function handleCallbackQuery(cb, env) {
     }
 
     if (action === 'tm_pass') {
-      await env.SETTINGS_KV.put(
+      await getStore(env).put(
         `prompt:${userId}`,
         JSON.stringify({ type: 'archive_password', taskId: tid }),
         { expirationTtl: 600 }
@@ -1777,7 +1876,7 @@ async function handleCallbackQuery(cb, env) {
         task.folderName = 'Gofile (Guest)';
         task.duplicateExists = false;
       }
-      await env.SETTINGS_KV.put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
+      await getStore(env).put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
       await editMessage(chatId, msgId, buildTaskMenuMessage(task), env, buildTaskMenuKeyboard(task));
       await answerCb(cb.id, `Destination: ${task.dest === 'gofile' ? 'Gofile (Temp)' : 'Google Drive'}`, false, env);
       return;
@@ -1841,7 +1940,7 @@ async function handleCallbackQuery(cb, env) {
 
   if (data.startsWith('st_')) {
     const [action, jobId] = data.split(':');
-    const jr = await env.SETTINGS_KV.get(`job:${jobId}`);
+    const jr = await getStore(env).get(`job:${jobId}`);
     const job = jr ? JSON.parse(jr) : null;
 
     if (action === 'st_ref') {
@@ -1858,7 +1957,7 @@ async function handleCallbackQuery(cb, env) {
       await deleteMessage(chatId, msgId, env);
       if (job) {
         job.messageId = '';
-        await env.SETTINGS_KV.put(`job:${jobId}`, JSON.stringify(job), { expirationTtl: 25200 });
+        await getStore(env).put(`job:${jobId}`, JSON.stringify(job), { expirationTtl: 25200 });
       }
       await answerCb(cb.id, 'Closed — use /tasks to reopen', false, env);
       return;
@@ -1871,7 +1970,7 @@ async function handleCallbackQuery(cb, env) {
   }
 
   if (data === 'hist_clear') {
-    await env.SETTINGS_KV.delete(`history:${userId}`);
+    await getStore(env).delete(`history:${userId}`);
     await answerCb(cb.id, 'History cleared', false, env);
     await sendHistory(chatId, userId, msgId, env);
     return;
@@ -2158,7 +2257,7 @@ async function launchMirrorTask(task, env) {
     createdAt: Date.now()
   };
 
-  await env.SETTINGS_KV.put(`job:${taskId}`, JSON.stringify(jobData), { expirationTtl: 25200 });
+  await getStore(env).put(`job:${taskId}`, JSON.stringify(jobData), { expirationTtl: 25200 });
   await addActiveJobForUser(userId, taskId, env);
 
   const dispatched = await triggerGithubWorkflow(taskId, env);
@@ -2333,7 +2432,7 @@ async function handleInternalRunner(request, path, env) {
   const jobId = body.job_id;
   if (!jobId) return jsonResponse({ ok: false, error: 'Missing job_id' }, 400);
 
-  const jRaw = await env.SETTINGS_KV.get(`job:${jobId}`);
+  const jRaw = await getStore(env).get(`job:${jobId}`);
   if (!jRaw) return jsonResponse({ ok: false, error: 'Job not found' }, 404);
   const job = JSON.parse(jRaw);
 
@@ -2341,7 +2440,7 @@ async function handleInternalRunner(request, path, env) {
     if (body.run_id) {
       job.runId = String(body.run_id);
       job.status = 'running';
-      await env.SETTINGS_KV.put(`job:${jobId}`, JSON.stringify(job), { expirationTtl: 25200 });
+      await getStore(env).put(`job:${jobId}`, JSON.stringify(job), { expirationTtl: 25200 });
     }
     const tokenInfo = await getValidTokenInfo(job.userId, env, false);
     if (job.dest !== 'gofile' && !tokenInfo) {
@@ -2369,14 +2468,14 @@ async function handleInternalRunner(request, path, env) {
   if (path === '/internal/job-status') {
     if (typeof body.last_card === 'string' && body.last_card.length > 0) {
       job.lastCardHtml = body.last_card;
-      await env.SETTINGS_KV.put(`job:${jobId}`, JSON.stringify(job), { expirationTtl: 25200 });
+      await getStore(env).put(`job:${jobId}`, JSON.stringify(job), { expirationTtl: 25200 });
     }
     return jsonResponse({ ok: true, cancelled: !!job.cancelled, status: job.status, messageId: job.messageId || '' });
   }
 
   if (path === '/internal/complete') {
     job.status = body.status || 'completed';
-    await env.SETTINGS_KV.put(`job:${jobId}`, JSON.stringify(job), { expirationTtl: 3600 });
+    await getStore(env).put(`job:${jobId}`, JSON.stringify(job), { expirationTtl: 3600 });
     await removeActiveJobForUser(job.userId, jobId, env);
 
     if (Array.isArray(body.items) && body.items.length > 0) {
@@ -2408,14 +2507,14 @@ async function handleInternalRunner(request, path, env) {
 
 async function appendHistory(userId, entries, env) {
   if (!entries || !entries.length) return;
-  const raw = await env.SETTINGS_KV.get(`history:${userId}`);
+  const raw = await getStore(env).get(`history:${userId}`);
   const list = raw ? JSON.parse(raw) : [];
   const merged = [...entries.reverse(), ...list].slice(0, MAX_HISTORY_ITEMS);
-  await env.SETTINGS_KV.put(`history:${userId}`, JSON.stringify(merged));
+  await getStore(env).put(`history:${userId}`, JSON.stringify(merged));
 }
 
 async function sendHistory(chatId, userId, editMsgId, env) {
-  const raw = await env.SETTINGS_KV.get(`history:${userId}`);
+  const raw = await getStore(env).get(`history:${userId}`);
   const list = raw ? JSON.parse(raw) : [];
 
   if (!list.length) {
@@ -2457,21 +2556,21 @@ async function sendHistory(chatId, userId, editMsgId, env) {
 }
 
 async function addActiveJobForUser(userId, jobId, env) {
-  const raw = await env.SETTINGS_KV.get(`active:${userId}`);
+  const raw = await getStore(env).get(`active:${userId}`);
   const list = raw ? JSON.parse(raw) : [];
   if (!list.includes(jobId)) list.push(jobId);
-  await env.SETTINGS_KV.put(`active:${userId}`, JSON.stringify(list), { expirationTtl: 25200 });
+  await getStore(env).put(`active:${userId}`, JSON.stringify(list), { expirationTtl: 25200 });
 }
 
 async function removeActiveJobForUser(userId, jobId, env) {
-  const raw = await env.SETTINGS_KV.get(`active:${userId}`);
+  const raw = await getStore(env).get(`active:${userId}`);
   if (!raw) return;
   const list = JSON.parse(raw).filter(id => id !== jobId);
-  await env.SETTINGS_KV.put(`active:${userId}`, JSON.stringify(list), { expirationTtl: 25200 });
+  await getStore(env).put(`active:${userId}`, JSON.stringify(list), { expirationTtl: 25200 });
 }
 
 async function cancelActiveJob(chatId, userId, jobId, env) {
-  const jRaw = await env.SETTINGS_KV.get(`job:${jobId}`);
+  const jRaw = await getStore(env).get(`job:${jobId}`);
   if (!jRaw) {
     await sendMessage(chatId, `<i>Task <code>${escapeHtml(jobId)}</code> is no longer active.</i>`, env);
     return;
@@ -2483,7 +2582,7 @@ async function cancelActiveJob(chatId, userId, jobId, env) {
   }
   job.cancelled = true;
   job.status = 'cancelled';
-  await env.SETTINGS_KV.put(`job:${jobId}`, JSON.stringify(job), { expirationTtl: 3600 });
+  await getStore(env).put(`job:${jobId}`, JSON.stringify(job), { expirationTtl: 3600 });
   await removeActiveJobForUser(job.userId, jobId, env);
 
   if (job.runId) {
@@ -2504,13 +2603,13 @@ async function cancelActiveJob(chatId, userId, jobId, env) {
 }
 
 async function sendActiveTasks(chatId, userId, env) {
-  const raw = await env.SETTINGS_KV.get(`active:${userId}`);
+  const raw = await getStore(env).get(`active:${userId}`);
   const list = raw ? JSON.parse(raw) : [];
   const activeJobs = [];
   const keptIds = [];
 
   for (const jid of list) {
-    const jr = await env.SETTINGS_KV.get(`job:${jid}`);
+    const jr = await getStore(env).get(`job:${jid}`);
     if (!jr) continue;
     const j = JSON.parse(jr);
     if (j.cancelled || ['completed', 'cancelled', 'failed'].includes(j.status)) continue;
@@ -2519,7 +2618,7 @@ async function sendActiveTasks(chatId, userId, env) {
   }
 
   if (keptIds.length !== list.length) {
-    await env.SETTINGS_KV.put(`active:${userId}`, JSON.stringify(keptIds), { expirationTtl: 25200 });
+    await getStore(env).put(`active:${userId}`, JSON.stringify(keptIds), { expirationTtl: 25200 });
   }
 
   if (!activeJobs.length) {
@@ -2558,7 +2657,7 @@ async function sendActiveTasks(chatId, userId, env) {
     const sent = await sendMessage(chatId, cardText, env, kb);
     if (sent?.result?.message_id) {
       j.messageId = String(sent.result.message_id);
-      await env.SETTINGS_KV.put(`job:${jid}`, JSON.stringify(j), { expirationTtl: 25200 });
+      await getStore(env).put(`job:${jid}`, JSON.stringify(j), { expirationTtl: 25200 });
     }
   }
 }
