@@ -1969,6 +1969,41 @@ async function handleCallbackQuery(cb, env) {
     }
   }
 
+  if (data.startsWith('tg_dec:')) {
+    const [, jobId, choice] = data.split(':');
+    if (choice !== 'lt2gb' && choice !== 'skip') {
+      await answerCb(cb.id, 'Unknown option.', true, env);
+      return;
+    }
+    const jr = await getStore(env).get(`job:${jobId}`);
+    if (!jr) {
+      await answerCb(cb.id, 'Task already finished or expired.', true, env);
+      return;
+    }
+    const job = JSON.parse(jr);
+    if (String(job.userId) !== String(userId)) {
+      await answerCb(cb.id, 'You can only control your own task.', true, env);
+      return;
+    }
+    job.tgDecision = choice;
+    await getStore(env).put(`job:${jobId}`, JSON.stringify(job), { expirationTtl: 25200 });
+    await answerCb(
+      cb.id,
+      choice === 'lt2gb' ? 'Uploading < 2 GB files to Telegram...' : 'Skipping Telegram upload...',
+      false,
+      env
+    );
+    await editMessage(
+      chatId,
+      msgId,
+      choice === 'lt2gb'
+        ? `<blockquote><b>Telegram Media Upload</b>\n\nConfirmed: uploading files under 2 GB to this chat and skipping oversized files.</blockquote>`
+        : `<blockquote><b>Telegram Media Upload Skipped</b>\n\nSkipped Telegram media upload. Continuing standard mirror upload...</blockquote>`,
+      env
+    );
+    return;
+  }
+
   if (data === 'hist_clear') {
     await getStore(env).delete(`history:${userId}`);
     await answerCb(cb.id, 'History cleared', false, env);
@@ -2227,7 +2262,9 @@ async function launchMirrorTask(task, env) {
     userId,
     username: task.username,
     chatId,
+    replyToMsgId: task.replyToMsgId || null,
     messageId: menuMsgId,
+    tgDecision: '',
     fileUrl: task.fileUrl,
     items: task.items,
     batch: !!task.batch,
@@ -2470,7 +2507,13 @@ async function handleInternalRunner(request, path, env) {
       job.lastCardHtml = body.last_card;
       await getStore(env).put(`job:${jobId}`, JSON.stringify(job), { expirationTtl: 25200 });
     }
-    return jsonResponse({ ok: true, cancelled: !!job.cancelled, status: job.status, messageId: job.messageId || '' });
+    return jsonResponse({
+      ok: true,
+      cancelled: !!job.cancelled,
+      status: job.status,
+      messageId: job.messageId || '',
+      tgDecision: job.tgDecision || ''
+    });
   }
 
   if (path === '/internal/complete') {

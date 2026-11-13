@@ -11,6 +11,7 @@ Job item types:
                                                           or authenticated download for extract/zip
 """
 
+import asyncio
 import base64
 import html
 import http.client
@@ -37,6 +38,8 @@ WORKER_URL = os.environ.get("WORKER_URL", "").rstrip("/")
 JOB_SECRET = os.environ.get("JOB_SECRET", "")
 JOB_ID = os.environ.get("JOB_ID", "")
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_API_ID = (os.environ.get("TELEGRAM_API_ID") or "").strip()
+TELEGRAM_API_HASH = (os.environ.get("TELEGRAM_API_HASH") or "").strip()
 GITHUB_RUN_ID = os.environ.get("GITHUB_RUN_ID", "")
 YTDL_COOKIES = os.environ.get("YTDL_COOKIES", "")
 
@@ -49,6 +52,9 @@ RCLONE_CONF = Path.home() / ".config" / "rclone" / "rclone.conf"
 
 TICK_SECONDS = 2.5
 TOKEN_REFRESH_SECONDS = 40 * 60  # Google access tokens live ~60 min
+TG_BOT_MAX_BYTES = 2000 * 1024 * 1024  # Telegram Bot MTProto 2,000 MiB upload limit
+VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".webm", ".m4v", ".avi"}
+AUDIO_EXTS = {".mp3", ".m4a", ".opus", ".flac", ".aac", ".ogg", ".wav"}
 FOLDER_MIME = "application/vnd.google-apps.folder"
 TAR_SUFFIXES = (".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tgz", ".tbz2", ".txz", ".tar")
 COMPOUND_SUFFIXES = (".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst")
@@ -113,7 +119,19 @@ def worker_call(path: str, payload: dict):
 def tg_call(method: str, payload: dict):
     if not BOT_TOKEN:
         return {}
-    return http_json(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}", data=payload, timeout=10)
+    res = http_json(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}", data=payload, timeout=10)
+    if not res.get("ok") and payload.get("reply_markup"):
+        kb = payload["reply_markup"].get("inline_keyboard")
+        if kb and any("style" in btn for row in kb for btn in row):
+            stripped = {
+                **payload,
+                "reply_markup": {
+                    **payload["reply_markup"],
+                    "inline_keyboard": [[{k: v for k, v in btn.items() if k != "style"} for btn in row] for row in kb],
+                },
+            }
+            res = http_json(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}", data=stripped, timeout=10)
+    return res
 
 
 def edit_status(chat_id, message_id, text: str, reply_markup: dict = None):
@@ -440,13 +458,19 @@ def aria2_rpc(method: str, params: list = None):
     return http_json("http://127.0.0.1:6800/jsonrpc", data=payload, timeout=5)
 
 
-def sync_worker_state(job_id: str, last_card: str = None):
+def poll_worker_state(job_id: str, last_card: str = None):
     payload = {"job_id": job_id}
     if last_card:
         payload["last_card"] = last_card
     res = worker_call("/internal/job-status", payload)
     is_cancelled = bool(res.get("cancelled"))
     msg_id = str(res.get("messageId") or "") if "messageId" in res else None
+    tg_decision = str(res.get("tgDecision") or "")
+    return is_cancelled, msg_id, tg_decision
+
+
+def sync_worker_state(job_id: str, last_card: str = None):
+    is_cancelled, msg_id, _ = poll_worker_state(job_id, last_card=last_card)
     return is_cancelled, msg_id
 
 
@@ -884,39 +908,121 @@ def prepare_ytdl_cookiefile(raw_cookies: str = None):
     return cookie_path
 
 
-def ensure_ytdl_tools():
-    target_dir = Path("/tmp/ytdl_pkgs")
-    if str(target_dir) not in sys.path:
-        sys.path.insert(0, str(target_dir))
+_PKG_TARGET = Path("/tmp/ytdl_pkgs")
+_DISK_EXPANDED = False
+
+
+def _prepare_pkg_paths():
+    if str(_PKG_TARGET) not in sys.path:
+        sys.path.insert(0, str(_PKG_TARGET))
     user_site = site.getusersitepackages()
     if user_site and os.path.isdir(user_site):
         site.addsitedir(user_site)
     importlib.invalidate_caches()
 
+
+def _pip_install_target(pkgs: list):
+    _PKG_TARGET.mkdir(parents=True, exist_ok=True)
+    res = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--break-system-packages", "--upgrade", "-q", "--target", str(_PKG_TARGET), *pkgs],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    if res.returncode != 0:
+        res = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--upgrade", "-q", "--target", str(_PKG_TARGET), *pkgs],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        if res.returncode != 0:
+            raise RuntimeError(f"Failed to install {' '.join(pkgs)}: {(res.stdout or '').strip()[-400:]}")
+    _prepare_pkg_paths()
+
+
+def ensure_disk_space(min_free_bytes: int):
+    """Expand GitHub runner disk lazily only when free space is below min_free_bytes."""
+    global _DISK_EXPANDED
+    if _DISK_EXPANDED or shutil.disk_usage("/").free >= min_free_bytes:
+        return
+    _DISK_EXPANDED = True
+    cleanup_paths = [
+        "/usr/share/dotnet", "/usr/local/lib/android", "/opt/ghc",
+        "/opt/hostedtoolcache/CodeQL", "/usr/local/.ghcup", "/usr/share/swift", "/opt/microsoft",
+    ]
+    subprocess.run(["sudo", "rm", "-rf", *cleanup_paths], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["sudo", "docker", "image", "prune", "-af"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def ensure_ytdl_tools():
+    _prepare_pkg_paths()
     try:
         import yt_dlp  # noqa: F401
         import mutagen  # noqa: F401
     except ImportError:
-        target_dir.mkdir(parents=True, exist_ok=True)
-        pkgs = ["yt-dlp[default]", "mutagen"]
-        res = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--break-system-packages", "--upgrade", "-q", "--target", str(target_dir), *pkgs],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-        )
-        if res.returncode != 0:
-            res = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "--upgrade", "-q", "--target", str(target_dir), *pkgs],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-            )
-            if res.returncode != 0:
-                raise RuntimeError(f"Failed to install yt-dlp: {(res.stdout or '').strip()[-400:]}")
-        if user_site and os.path.isdir(user_site):
-            site.addsitedir(user_site)
-        importlib.invalidate_caches()
+        _pip_install_target(["yt-dlp[default]", "mutagen"])
         import yt_dlp  # noqa: F401
     if not shutil.which("ffmpeg"):
         subprocess.run(["sudo", "apt-get", "update", "-qq"], check=False)
         subprocess.run(["sudo", "apt-get", "install", "-y", "-qq", "ffmpeg"], check=True)
+
+
+def ensure_kurigram_tools():
+    _prepare_pkg_paths()
+    try:
+        from pyrogram import Client  # noqa: F401
+        return
+    except ImportError:
+        pass
+    try:
+        _pip_install_target(["kurigram", "tgcrypto"])
+    except Exception:
+        _pip_install_target(["kurigram"])
+    from pyrogram import Client  # noqa: F401
+
+
+def probe_media_meta(path: Path) -> dict:
+    meta = {"duration": 0, "width": 0, "height": 0}
+    if not shutil.which("ffprobe"):
+        return meta
+    try:
+        res = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", str(path)],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=15,
+        )
+        if res.returncode != 0 or not res.stdout:
+            return meta
+        info = json.loads(res.stdout)
+        dur = float((info.get("format") or {}).get("duration") or 0)
+        if dur > 0:
+            meta["duration"] = int(round(dur))
+        for st in info.get("streams") or []:
+            if st.get("codec_type") == "video" and st.get("codec_name") not in ("mjpeg", "png", "webp"):
+                meta["width"] = int(st.get("width") or 0)
+                meta["height"] = int(st.get("height") or 0)
+                if not meta["duration"] and st.get("duration"):
+                    meta["duration"] = int(round(float(st["duration"])))
+                break
+    except Exception:
+        pass
+    return meta
+
+
+def make_media_thumb(path: Path, out_dir: Path):
+    if not shutil.which("ffmpeg"):
+        return None
+    thumb = out_dir / f".tgthumb_{uuid.uuid4().hex[:8]}.jpg"
+    attempts = [
+        ["ffmpeg", "-y", "-i", str(path), "-map", "0:v:1", "-frames:v", "1", "-vf", "scale='min(320,iw)':-2", "-q:v", "4", str(thumb)],
+        ["ffmpeg", "-y", "-ss", "00:00:05", "-i", str(path), "-frames:v", "1", "-vf", "scale='min(320,iw)':-2", "-q:v", "4", str(thumb)],
+        ["ffmpeg", "-y", "-ss", "00:00:00", "-i", str(path), "-frames:v", "1", "-vf", "scale='min(320,iw)':-2", "-q:v", "4", str(thumb)],
+    ]
+    for cmd in attempts:
+        try:
+            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+            if res.returncode == 0 and thumb.is_file() and thumb.stat().st_size > 0:
+                return thumb
+        except Exception:
+            pass
+    thumb.unlink(missing_ok=True)
+    return None
 
 
 # ============================================================================
@@ -960,6 +1066,9 @@ class Mirror:
         self.last_sync = 0.0
         self.last_card_sync = 0.0
         self.last_sync_status = ""
+        self.tg_sent = 0
+        self.tg_skipped = 0
+        self.tg_note = ""
         self.idx = 0
         self.aria_proc = None
         self.token_srv = None
@@ -2075,6 +2184,211 @@ class Mirror:
             return self.gdrive_download_file(item, meta, dest_dir, name)
         return self.aria_download(item["url"], dest_dir, out_name=self.single_name(), label=self.item_label(item))
 
+    async def _kurigram_send_files(self, files: list) -> int:
+        from pyrogram import Client
+        try:
+            from pyrogram.enums import ParseMode
+            pm_html = ParseMode.HTML
+        except Exception:
+            pm_html = None
+
+        reply_id = self.job.get("replyToMsgId")
+        try:
+            reply_id = int(reply_id) if reply_id else None
+        except Exception:
+            reply_id = None
+
+        sent_count = 0
+        async with Client(
+            f"mirror_{JOB_ID or 'run'}",
+            api_id=int(TELEGRAM_API_ID),
+            api_hash=TELEGRAM_API_HASH,
+            bot_token=BOT_TOKEN,
+            in_memory=True,
+            workers=8,
+        ) as app:
+            for idx, fpath in enumerate(files, 1):
+                if cancelled:
+                    raise InterruptedError("Cancelled by user")
+                sz = fpath.stat().st_size
+                meta = probe_media_meta(fpath)
+                thumb = make_media_thumb(fpath, fpath.parent)
+                t_start = time.time()
+                win = [t_start, 0]
+
+                def on_prog(current, total):
+                    global cancelled
+                    if cancelled:
+                        raise InterruptedError("Cancelled by user")
+                    now = time.time()
+                    dt = max(0.05, now - win[0])
+                    spd = max(0.0, (current - win[1]) / dt) if current >= win[1] else 0.0
+                    tot = total or sz
+                    pct = (100.0 * current / tot) if tot > 0 else 0.0
+                    eta = ((tot - current) / spd) if spd > 0 and tot > current else None
+                    label = f"TG {idx}/{len(files)}.." if len(files) > 1 else "Uploading (TG).."
+                    self.tick(fpath.name, label, pct, current, tot, spd, eta, "Kurigram MTProto")
+                    if now - win[0] >= TICK_SECONDS:
+                        win[0] = now
+                        win[1] = current
+
+                caption = f"<code>{html.escape(fpath.name)}</code>  ·  <code>{fmt_bytes(sz)}</code>"
+                kw = {"caption": caption, "progress": on_prog}
+                if pm_html is not None:
+                    kw["parse_mode"] = pm_html
+                if thumb:
+                    kw["thumb"] = str(thumb)
+                if reply_id and idx == 1:
+                    kw["reply_to_message_id"] = reply_id
+
+                try:
+                    if fpath.suffix.lower() in AUDIO_EXTS:
+                        if meta["duration"]:
+                            kw["duration"] = meta["duration"]
+                        kw["title"] = fpath.stem
+                        try:
+                            await app.send_audio(self.chat_id, audio=str(fpath), **kw)
+                        except Exception:
+                            kw.pop("reply_to_message_id", None)
+                            await app.send_audio(self.chat_id, audio=str(fpath), **kw)
+                    else:
+                        if meta["duration"]:
+                            kw["duration"] = meta["duration"]
+                        if meta["width"] and meta["height"]:
+                            kw["width"] = meta["width"]
+                            kw["height"] = meta["height"]
+                        kw["supports_streaming"] = True
+                        try:
+                            await app.send_video(self.chat_id, video=str(fpath), **kw)
+                        except Exception:
+                            if "reply_to_message_id" in kw:
+                                kw.pop("reply_to_message_id", None)
+                                try:
+                                    await app.send_video(self.chat_id, video=str(fpath), **kw)
+                                except Exception:
+                                    doc_kw = {k: v for k, v in kw.items() if k in ("caption", "progress", "parse_mode", "thumb")}
+                                    await app.send_document(self.chat_id, document=str(fpath), **doc_kw)
+                            else:
+                                doc_kw = {k: v for k, v in kw.items() if k in ("caption", "progress", "parse_mode", "thumb")}
+                                await app.send_document(self.chat_id, document=str(fpath), **doc_kw)
+                    sent_count += 1
+                finally:
+                    if thumb:
+                        thumb.unlink(missing_ok=True)
+        return sent_count
+
+    def _wait_tg_overlimit_decision(self, under: list, over: list) -> str:
+        over_lines = "\n".join(
+            f"• <code>{html.escape(truncate(p.name, 48))}</code> (<code>{fmt_bytes(p.stat().st_size)}</code>)"
+            for p in over[:8]
+        )
+        if len(over) > 8:
+            over_lines += f"\n<i>…and {len(over) - 8} more oversized file(s)</i>"
+        dest_label = "Gofile (Guest)" if self.dest == "gofile" else html.escape(self.folder_name)
+        prompt_text = (
+            f"<blockquote><b>Telegram 2 GB Limit Notice</b>\n\n"
+            f"{len(over)} file(s) exceed Telegram's <code>2.00 GB</code> Bot upload limit:\n"
+            f"{over_lines}</blockquote>\n\n"
+            f"<code>{len(under)}</code> file(s) are under <code>2 GB</code>. Nothing has been sent to Telegram yet.\n"
+            f"Standard upload to <b>{dest_label}</b> will still proceed either way:"
+        )
+        kb = {
+            "inline_keyboard": [
+                [{"text": f"📤 Mirror < 2 GB Only ({len(under)} files)", "callback_data": f"tg_dec:{JOB_ID}:lt2gb", "style": "success"}],
+                [{"text": "⏭ Skip Whole TG Upload", "callback_data": f"tg_dec:{JOB_ID}:skip", "style": "danger"}],
+            ]
+        }
+        sent = send_message(self.chat_id, prompt_text, kb)
+        prompt_msg_id = (sent.get("result") or {}).get("message_id")
+        deadline = time.time() + 180.0
+        while time.time() < deadline:
+            global cancelled
+            if cancelled:
+                raise InterruptedError("Cancelled by user")
+            self.tick(
+                over[0].name,
+                "Waiting for TG Choice..",
+                0.0,
+                0,
+                0,
+                0,
+                None,
+                "Kurigram MTProto",
+            )
+            is_canc, synced_msg_id, dec = poll_worker_state(JOB_ID)
+            if synced_msg_id is not None:
+                self.message_id = synced_msg_id
+            if is_canc:
+                cancelled = True
+                raise InterruptedError("Cancelled by user")
+            if dec in ("lt2gb", "skip"):
+                return dec
+            time.sleep(2.0)
+        if prompt_msg_id:
+            edit_status(
+                self.chat_id,
+                prompt_msg_id,
+                "<blockquote><b>Telegram Media Upload Skipped</b>\n\nTimed out waiting for choice. Continuing standard mirror upload...</blockquote>",
+            )
+        return "skip"
+
+    def tg_upload_ytdl_media(self, local: Path):
+        if not BOT_TOKEN or not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
+            return
+        all_exts = VIDEO_EXTS | AUDIO_EXTS
+        if local.is_file():
+            candidates = [local] if local.suffix.lower() in all_exts else []
+        elif local.is_dir():
+            candidates = sorted(p for p in local.rglob("*") if p.is_file() and p.suffix.lower() in all_exts)
+        else:
+            candidates = []
+        candidates = [p for p in candidates if p.stat().st_size > 0]
+        if not candidates:
+            return
+
+        under = [p for p in candidates if p.stat().st_size < TG_BOT_MAX_BYTES]
+        over = [p for p in candidates if p.stat().st_size >= TG_BOT_MAX_BYTES]
+        dest_label = "Gofile (Guest)" if self.dest == "gofile" else html.escape(self.folder_name)
+
+        if over and not under:
+            names = html.escape(truncate(over[0].name, 60))
+            sz = fmt_bytes(over[0].stat().st_size)
+            extra = f"\n<i>(+{len(over) - 1} more file(s) &gt; 2 GB)</i>" if len(over) > 1 else ""
+            send_message(
+                self.chat_id,
+                f"<blockquote><b>Telegram Upload Skipped (&gt; 2 GB)</b>\n\n"
+                f"<code>{names}</code> (<code>{sz}</code>){extra}\n\n"
+                f"Exceeds Telegram's <code>2 GB</code> Bot upload limit. Continuing standard upload to <b>{dest_label}</b>...</blockquote>",
+            )
+            self.tg_skipped += len(over)
+            self.tg_note = "Skipped (> 2 GB limit)"
+            return
+
+        targets = under
+        if over and under:
+            choice = self._wait_tg_overlimit_decision(under, over)
+            if choice != "lt2gb":
+                self.tg_skipped += len(candidates)
+                self.tg_note = "Skipped by user (> 2 GB present)"
+                return
+            self.tg_skipped += len(over)
+
+        try:
+            self.tick(targets[0].name, "Setting up Kurigram..", 0.0, 0, path_size(targets[0]), 0, None, "Kurigram MTProto", force=True)
+            ensure_kurigram_tools()
+            sent_n = asyncio.run(self._kurigram_send_files(targets))
+            self.tg_sent += sent_n
+        except InterruptedError:
+            raise
+        except Exception as e:
+            self.tg_note = f"TG upload failed: {truncate(str(e), 90)}"
+            send_message(
+                self.chat_id,
+                f"<blockquote><b>Telegram Media Notice</b>\n\n"
+                f"Could not upload media to chat: <code>{html.escape(truncate(str(e), 200))}</code>\n"
+                f"Continuing standard upload to <b>{dest_label}</b>...</blockquote>",
+            )
+
     def process_and_upload(self, local: Path) -> dict:
         size = path_size(local)
         mode = self.mode
@@ -2123,6 +2437,8 @@ class Mirror:
                 if mime != FOLDER_MIME and (self.mode == "normal" or mime.startswith("application/vnd.google-apps.")):
                     return self.gdrive_copy_file(item, meta, name)
         local = self.acquire_local(item, item_dir)
+        if item.get("type") == "ytdl":
+            self.tg_upload_ytdl_media(local)
         return self.process_and_upload(local)
 
     def run_batch_zip(self) -> list:
@@ -2132,7 +2448,9 @@ class Mirror:
         for i, item in enumerate(self.items):
             self.idx = i
             try:
-                self.acquire_local(item, bdir)
+                local = self.acquire_local(item, bdir)
+                if item.get("type") == "ytdl":
+                    self.tg_upload_ytdl_media(local)
             except InterruptedError:
                 raise
             except Exception as e:
@@ -2153,6 +2471,13 @@ class Mirror:
     def run(self) -> list:
         DL_DIR.mkdir(parents=True, exist_ok=True)
         OUT_DIR.mkdir(parents=True, exist_ok=True)
+        all_ytdl = all(it.get("type") == "ytdl" for it in self.items)
+        if not all_ytdl:
+            est = int(self.job.get("fileSize") or 0)
+            mult = 2.2 if self.mode in ("extract", "zip") else 1.15
+            needed = (int(est * mult) + 4 * 1024**3) if est > 0 else (35 * 1024**3 if self.batch else 0)
+            if needed > 0:
+                ensure_disk_space(needed)
         if self.access_token:
             self.start_token_server()
             self.write_rclone_conf()
@@ -2207,6 +2532,14 @@ class Mirror:
                 if r.get("shared"):
                     text += "Access  ·  Anyone with the link\n\n"
             text += f"Elapsed  ·  <code>{elapsed}</code>\n\nUser  ·  {html.escape(self.uname())}"
+            if self.tg_sent > 0 or self.tg_skipped > 0 or self.tg_note:
+                if self.tg_sent > 0 and self.tg_skipped > 0:
+                    tg_status = f"Sent {self.tg_sent} file(s) (< 2 GB), skipped {self.tg_skipped} (> 2 GB)"
+                elif self.tg_sent > 0:
+                    tg_status = f"Sent {self.tg_sent} media file(s) to chat"
+                else:
+                    tg_status = self.tg_note or "Skipped"
+                text += f"\n\nTelegram  ·  {html.escape(tg_status)}"
             if is_gofile:
                 text += f"\n\n<blockquote>{GOFILE_NOTICE_HTML}</blockquote>"
                 rows = [[{"text": "▸  Open Gofile Folder" if r.get("isDir") else "▸  Open Gofile", "url": r["link"], "style": "success"}]]
@@ -2224,9 +2557,18 @@ class Mirror:
                 f"<code>{len(ok)} / {len(results)} succeeded</code></blockquote>\n\n"
             )
             dest_line = "Dest  ·  Gofile (Guest Session)" if is_gofile else f"Folder  ·  {html.escape(self.folder_name)}"
+            tg_line = ""
+            if self.tg_sent > 0 or self.tg_skipped > 0 or self.tg_note:
+                if self.tg_sent > 0 and self.tg_skipped > 0:
+                    tg_status = f"Sent {self.tg_sent} file(s) (< 2 GB), skipped {self.tg_skipped} (> 2 GB)"
+                elif self.tg_sent > 0:
+                    tg_status = f"Sent {self.tg_sent} media file(s) to chat"
+                else:
+                    tg_status = self.tg_note or "Skipped"
+                tg_line = f"\nTelegram  ·  {html.escape(tg_status)}\n"
             warn_block = f"\n\n<blockquote>{GOFILE_NOTICE_HTML}</blockquote>" if (is_gofile and ok) else ""
             footer = (
-                f"\n{dest_line}\n\n"
+                f"\n{dest_line}\n{tg_line}\n"
                 f"Elapsed  ·  <code>{elapsed}</code>\n\nUser  ·  {html.escape(self.uname())}"
                 f"{warn_block}"
             )
@@ -2263,6 +2605,8 @@ def main():
 
     mask_secret(JOB_SECRET)
     mask_secret(BOT_TOKEN)
+    mask_secret(TELEGRAM_API_ID)
+    mask_secret(TELEGRAM_API_HASH)
 
     init_res = worker_call("/internal/job", {"job_id": JOB_ID, "run_id": GITHUB_RUN_ID})
     if not init_res.get("ok"):
