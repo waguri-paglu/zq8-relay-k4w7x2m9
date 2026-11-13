@@ -13,128 +13,83 @@ jobs:
       - name: Setup Tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq aria2 ffmpeg
+          sudo apt-get install -y -qq ffmpeg
           python3 -m pip install --break-system-packages -q --upgrade "yt-dlp[default]" mutagen || python3 -m pip install -q --upgrade "yt-dlp[default]" mutagen
-          yt-dlp --version
-          aria2c --version | head -n 2
-          node --version || true
 
-      - name: Benchmark YouTube Download Speeds
+      - name: End-to-End Dashy Download and Merge Verification
         env:
           YTDL_COOKIES: ${{ secrets.YTDL_COOKIES }}
         run: |
           python3 - << 'PY'
-          import os, json, time, shutil, tempfile, subprocess, urllib.parse
+          import os, json, time, shutil, tempfile
           import yt_dlp
 
-          # Prepare cookiefile safely (never print contents)
           raw = (os.environ.get("YTDL_COOKIES") or "").strip()
-          cookie_file = None
-          if raw:
-              p = "/tmp/bench_cookies.txt"
-              if raw.startswith("["):
-                  items = json.loads(raw)
-                  lines = ["# Netscape HTTP Cookie File"]
-                  for c in items:
-                      dom = (c.get("domain") or "").strip()
-                      if not dom:
-                          continue
-                      inc = "TRUE" if dom.startswith(".") else "FALSE"
-                      path = c.get("path") or "/"
-                      sec = "TRUE" if c.get("secure") else "FALSE"
-                      exp = str(int(c.get("expirationDate") or c.get("expires") or 0))
-                      lines.append("\t".join([dom, inc, path, sec, exp, c.get("name") or "", c.get("value") or ""]))
-                  open(p, "w").write("\n".join(lines) + "\n")
-              else:
-                  open(p, "w").write(raw + "\n")
-              cookie_file = p
-          print("has_cookies:", bool(cookie_file), "yt_dlp:", yt_dlp.version.__version__)
+          cookie_file = "/tmp/bench_cookies.txt"
+          if raw.startswith("["):
+              items = json.loads(raw)
+              lines = ["# Netscape HTTP Cookie File"]
+              for c in items:
+                  dom = (c.get("domain") or "").strip()
+                  if not dom:
+                      continue
+                  inc = "TRUE" if dom.startswith(".") else "FALSE"
+                  path = c.get("path") or "/"
+                  sec = "TRUE" if c.get("secure") else "FALSE"
+                  exp = str(int(c.get("expirationDate") or c.get("expires") or 0))
+                  lines.append("\t".join([dom, inc, path, sec, exp, c.get("name") or "", c.get("value") or ""]))
+              open(cookie_file, "w").write("\n".join(lines) + "\n")
+          else:
+              open(cookie_file, "w").write(raw + "\n")
 
-          url = "https://youtu.be/Kdxem4YkrJY"
+          d = tempfile.mkdtemp(prefix="yte2e_")
+          hooks = {"ticks": 0, "max_spd": 0.0, "last_log": 0.0, "streams": []}
+          def p_hook(info):
+              if info.get("status") == "downloading":
+                  hooks["ticks"] += 1
+                  spd = float(info.get("speed") or 0)
+                  if spd > hooks["max_spd"]:
+                      hooks["max_spd"] = spd
+                  now = time.time()
+                  if now - hooks["last_log"] >= 2.0:
+                      hooks["last_log"] = now
+                      done = float(info.get("downloaded_bytes") or 0)
+                      tot = float(info.get("total_bytes") or info.get("total_bytes_estimate") or 0)
+                      print(f"PROGRESS: done={done/1e6:.1f}MB tot={tot/1e6:.1f}MB spd={spd/1e6:.1f}MB/s", flush=True)
+              elif info.get("status") == "finished":
+                  hooks["streams"].append(info.get("filename"))
 
-          def probe(label, extra_opts=None, use_cookie=False):
-              opts = {
-                  "format": "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b",
-                  "quiet": True,
-                  "no_warnings": True,
-                  "js_runtimes": {"node": {}} if shutil.which("node") else {},
-              }
-              if use_cookie and cookie_file:
-                  opts["cookiefile"] = cookie_file
-              if extra_opts:
-                  opts.update(extra_opts)
-              t0 = time.time()
-              try:
-                  with yt_dlp.YoutubeDL(opts) as ydl:
-                      info = ydl.extract_info(url, download=False)
-                  rf = info.get("requested_formats") or [info]
-                  v = rf[0]
-                  q = urllib.parse.parse_qs(urllib.parse.urlparse(v.get("url", "")).query)
-                  print(f"[PROBE {label}] dt={time.time()-t0:.1f}s fid={v.get('format_id')} proto={v.get('protocol')} size={v.get('filesize')} client={q.get('c',['?'])[0]} ip={q.get('ip',['?'])[0][:24]} ext={v.get('ext')}", flush=True)
-                  return info, v
-              except Exception as e:
-                  print(f"[PROBE {label}] ERR: {str(e)[:180]}", flush=True)
-                  return None, None
+          opts = {
+              "format": "bv*[height<=720][ext=mp4]+ba[ext=m4a]/bv*[height<=720]+ba/b[height<=720]/b",
+              "outtmpl": f"{d}/%(title).150B [%(id)s].%(ext)s",
+              "cookiefile": cookie_file,
+              "writethumbnail": True,
+              "merge_output_format": "mp4",
+              "postprocessors": [
+                  {"key": "FFmpegMetadata", "add_chapters": True, "add_metadata": True},
+                  {"key": "EmbedThumbnail", "already_have_thumbnail": False},
+              ],
+              "progress_hooks": [p_hook],
+              "concurrent_fragment_downloads": 16,
+              "http_chunk_size": 10 * 1024 * 1024,
+              "buffersize": 1024 * 1024,
+              "retries": 10,
+              "fragment_retries": 10,
+              "file_access_retries": 5,
+              "extractor_retries": 5,
+              "extractor_args": {"youtube": {"formats": ["dashy"]}},
+              "js_runtimes": {"node": {}} if shutil.which("node") else {},
+              "quiet": True,
+              "no_warnings": True,
+              "noprogress": True,
+          }
 
-          probe("with_cookies", use_cookie=True)
-          _, v_nocook = probe("no_cookies", use_cookie=False)
-          probe("dashy_with_cookies", {"extractor_args": {"youtube": {"formats": ["dashy"]}}}, use_cookie=True)
-          probe("dashy_no_cookies", {"extractor_args": {"youtube": {"formats": ["dashy"]}}}, use_cookie=False)
-          probe("visionos_hls", {"extractor_args": {"youtube": {"player_client": ["visionos"]}}}, use_cookie=False)
-          probe("tv_with_cookies", {"extractor_args": {"youtube": {"player_client": ["tv"]}}}, use_cookie=True)
-          probe("web_safari_with_cookies", {"extractor_args": {"youtube": {"player_client": ["web_safari"]}}}, use_cookie=True)
-
-          def bench_dl(label, extra_opts, use_cookie=False, dur=12):
-              d = tempfile.mkdtemp(prefix="ytb_")
-              opts = {
-                  "format": "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b",
-                  "outtmpl": f"{d}/out.%(ext)s",
-                  "quiet": True,
-                  "no_warnings": True,
-                  "noprogress": True,
-                  "js_runtimes": {"node": {}} if shutil.which("node") else {},
-              }
-              if use_cookie and cookie_file:
-                  opts["cookiefile"] = cookie_file
-              opts.update(extra_opts)
-
-              # Run in subprocess so timeout cleanly stops at dur seconds
-              code = f"""
-          import time, yt_dlp
-          opts = {repr(opts)}
+          t0 = time.time()
           with yt_dlp.YoutubeDL(opts) as ydl:
-              ydl.download([{repr(url)}])
-          """
-              t0 = time.time()
-              p = subprocess.Popen(["python3", "-c", code], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-              try:
-                  p.wait(timeout=dur)
-              except subprocess.TimeoutExpired:
-                  p.kill()
-                  p.wait()
-              subprocess.run(["pkill", "-9", "aria2c"], stderr=subprocess.DEVNULL)
-              dt = time.time() - t0
-              tot_blk = 0
-              files = []
-              for fn in os.listdir(d):
-                  fp = os.path.join(d, fn)
-                  if os.path.isfile(fp) and not fn.endswith(".aria2"):
-                      st = os.stat(fp)
-                      b = min(st.st_size, st.st_blocks * 512) if st.st_blocks > 0 else st.st_size
-                      tot_blk += b
-                      files.append(f"{fn}:{b/1e6:.1f}MB")
-              shutil.rmtree(d, ignore_errors=True)
-              print(f"[BENCH {label}] dt={dt:.1f}s bytes={tot_blk/1e6:.2f}MB rate={tot_blk/max(dt,0.1)/1e6:.2f} MB/s files={files}", flush=True)
-
-          aria_args = ["-x", "16", "-s", "16", "-k", "1M", "--file-allocation=none", "--summary-interval=0"]
-          bench_dl("cookies+aria2c", {"external_downloader": {"http": "aria2c", "https": "aria2c"}, "external_downloader_args": {"aria2c": aria_args}}, use_cookie=True, dur=18)
-          bench_dl("nocookies+aria2c", {"external_downloader": {"http": "aria2c", "https": "aria2c"}, "external_downloader_args": {"aria2c": aria_args}}, use_cookie=False, dur=18)
-          bench_dl("cookies+native_10M", {"http_chunk_size": 10*1024*1024}, use_cookie=True, dur=18)
-          bench_dl("nocookies+dashy_N16", {"extractor_args": {"youtube": {"formats": ["dashy"]}}, "concurrent_fragment_downloads": 16}, use_cookie=False, dur=18)
-          bench_dl("cookies+dashy_N16", {"extractor_args": {"youtube": {"formats": ["dashy"]}}, "concurrent_fragment_downloads": 16}, use_cookie=True, dur=18)
-          bench_dl("hls_m3u8_N16", {"format": "625/270/bv*[protocol^=m3u8]", "concurrent_fragment_downloads": 16}, use_cookie=False, dur=18)
-          bench_dl("ipv4+nocook+aria2c", {"force_ipv4": True, "external_downloader": {"http": "aria2c", "https": "aria2c"}, "external_downloader_args": {"aria2c": aria_args}}, use_cookie=False, dur=18)
-
-          if cookie_file and os.path.exists(cookie_file):
-              os.remove(cookie_file)
+              ydl.extract_info("https://youtu.be/Kdxem4YkrJY", download=True)
+          dt = time.time() - t0
+          outs = [(fn, os.path.getsize(os.path.join(d, fn))) for fn in os.listdir(d)]
+          print(f"E2E RESULT: dt={dt:.1f}s ticks={hooks['ticks']} max_spd={hooks['max_spd']/1e6:.2f}MB/s outs={outs}", flush=True)
+          shutil.rmtree(d, ignore_errors=True)
+          os.remove(cookie_file)
           PY

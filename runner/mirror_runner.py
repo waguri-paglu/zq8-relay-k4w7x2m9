@@ -786,6 +786,15 @@ def _ytdir_written_bytes(yt_dir: Path) -> int:
     return total
 
 
+def _is_youtube_url(url: str) -> bool:
+    """Return True when the target URL belongs to YouTube."""
+    try:
+        host = (urllib.parse.urlparse(url).hostname or "").lower().rstrip(".")
+    except Exception:
+        return False
+    return host in ("youtu.be", "youtube.com", "youtube-nocookie.com") or host.endswith((".youtube.com", ".youtube-nocookie.com"))
+
+
 def ytdl_format_spec(quality: str, container: str) -> str:
     if quality in YT_AUDIO_QUALITIES:
         return "ba/b"
@@ -1776,7 +1785,9 @@ class Mirror:
             "playlist_title": "",
             "native_tick_at": time.time(),
             "phase": "Downloading (16x)..",
-            "engine": "yt-dlp + Aria2c",
+            "engine": "yt-dlp (16x)",
+            "dl_phase": "Downloading (16x)..",
+            "dl_engine": "yt-dlp (16x)",
         }
 
         def progress_hook(d):
@@ -1802,7 +1813,7 @@ class Mirror:
                 eta = d.get("eta")
                 pct = (100.0 * done / total) if total > 0 else 0.0
                 try:
-                    self.tick(disp, "Downloading..", min(99.9, pct), done, total, spd, eta, "yt-dlp + FFmpeg")
+                    self.tick(disp, state["dl_phase"], min(99.9, pct), done, total, spd, eta, state["dl_engine"])
                 except InterruptedError:
                     cancelled = True
                     raise DownloadCancelled("Cancelled by user")
@@ -1811,7 +1822,7 @@ class Mirror:
                 state["phase"] = "Processing.."
                 total = float(d.get("total_bytes") or d.get("downloaded_bytes") or 0)
                 try:
-                    self.tick(disp, "Processing..", 99.0, total, total, 0, None, "yt-dlp + FFmpeg", force=True)
+                    self.tick(disp, "Processing..", 99.0, total, total, 0, None, state["dl_engine"], force=True)
                 except InterruptedError:
                     cancelled = True
                     raise DownloadCancelled("Cancelled by user")
@@ -1832,10 +1843,10 @@ class Mirror:
                     raise DownloadCancelled("Cancelled by user")
             elif st == "finished":
                 state["native_tick_at"] = time.time()
-                state["phase"] = "Downloading (16x).." if can_aria else "Downloading.."
-                state["engine"] = "yt-dlp + Aria2c" if can_aria else "yt-dlp + FFmpeg"
+                state["phase"] = state["dl_phase"]
+                state["engine"] = state["dl_engine"]
 
-        def build_ydl_opts(use_aria: bool) -> dict:
+        def build_ydl_opts(use_aria: bool, use_dashy: bool) -> dict:
             opts = {
                 "format": ytdl_format_spec(quality, container),
                 "outtmpl": str(yt_dir / "%(title).150B [%(id)s].%(ext)s"),
@@ -1851,11 +1862,16 @@ class Mirror:
                 "buffersize": 1024 * 1024,
                 "retries": 10,
                 "fragment_retries": 10,
+                "file_access_retries": 5,
+                "extractor_retries": 5,
                 "quiet": True,
                 "no_warnings": True,
                 "noprogress": True,
             }
-            if use_aria:
+            if use_dashy:
+                # Split YouTube HTTPS streams into 10 MiB &range= DASH segments for 16x native concurrency
+                opts["extractor_args"] = {"youtube": {"formats": ["dashy"]}}
+            elif use_aria:
                 opts["external_downloader"] = {"http": "aria2c", "https": "aria2c"}
                 opts["external_downloader_args"] = {
                     "aria2c": [
@@ -1884,16 +1900,22 @@ class Mirror:
                     opts["force_keyframes_at_cuts"] = True
             return opts
 
-        can_aria = bool(shutil.which("aria2c")) and not trim_spec
+        is_yt = _is_youtube_url(url)
+        use_dashy_primary = is_yt and not trim_spec
+        use_aria_primary = bool(shutil.which("aria2c")) and not is_yt and not trim_spec
         cookie_path = prepare_ytdl_cookiefile()
 
-        def run_ydl(use_aria: bool):
+        def run_ydl(use_aria: bool, use_dashy: bool):
             global cancelled
-            opts = build_ydl_opts(use_aria)
+            opts = build_ydl_opts(use_aria, use_dashy)
             if cookie_path:
                 opts["cookiefile"] = str(cookie_path)
-            state["engine"] = "yt-dlp + Aria2c" if use_aria else "yt-dlp + FFmpeg"
-            state["phase"] = "Downloading (16x).." if use_aria else "Downloading.."
+            dl_engine = "yt-dlp (16x)" if use_dashy else ("yt-dlp + Aria2c" if use_aria else "yt-dlp + FFmpeg")
+            dl_phase = "Downloading (16x).." if (use_dashy or use_aria) else "Downloading.."
+            state["engine"] = dl_engine
+            state["phase"] = dl_phase
+            state["dl_engine"] = dl_engine
+            state["dl_phase"] = dl_phase
 
             stop_mon = threading.Event()
 
@@ -1935,19 +1957,19 @@ class Mirror:
 
         try:
             try:
-                run_ydl(can_aria)
+                run_ydl(use_aria_primary, use_dashy_primary)
             except DownloadCancelled:
                 raise
             except Exception:
-                if cancelled or not can_aria:
+                if cancelled or not (use_aria_primary or use_dashy_primary):
                     raise
-                # Aria2c failed (e.g. strict CDN/TLS check); clean partial artifacts and fall back to tuned native yt-dlp
+                # Accelerated path failed (e.g. live/no-clen YouTube or strict CDN); clean partial files and fall back
                 for p in list(yt_dir.iterdir()):
-                    if p.is_file() and p.name.endswith((".aria2", ".part", ".temp")):
+                    if p.is_file() and (p.name.endswith((".aria2", ".part", ".temp")) or ".part-Frag" in p.name):
                         p.unlink(missing_ok=True)
                 state["native_tick_at"] = time.time()
                 self.tick(state["title"], "Retrying (Native)..", 0.0, 0, 0, 0, None, "yt-dlp + FFmpeg", force=True)
-                run_ydl(False)
+                run_ydl(False, False)
         except DownloadCancelled:
             raise InterruptedError("Cancelled by user")
         except Exception as e:
