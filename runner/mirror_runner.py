@@ -13,6 +13,7 @@ Job item types:
 
 import base64
 import html
+import http.client
 import http.server
 import importlib
 import json
@@ -28,6 +29,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -51,6 +53,11 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 TAR_SUFFIXES = (".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tgz", ".tbz2", ".txz", ".tar")
 COMPOUND_SUFFIXES = (".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst")
 ARIA_ENGINE = "Aria2c v1.37.0"
+GOFILE_NOTICE_HTML = (
+    "⚠ <b>Temporary Storage (Gofile):</b> Files are deleted after <b>100 GB download quota</b> "
+    "or <b>10 days of inactivity</b>. Re-mirror from the original source to renew, "
+    "or /login with your personal Google Drive for permanent storage."
+)
 
 cancelled = False
 
@@ -887,8 +894,9 @@ class Mirror:
         self.job = job
         self.chat_id = job["chatId"]
         self.message_id = job.get("messageId")
+        self.dest = job.get("dest") or "gdrive"
         self.folder_id = job.get("folderId") or "root"
-        self.folder_name = job.get("folderName") or "My Drive"
+        self.folder_name = "Gofile (Guest)" if self.dest == "gofile" else (job.get("folderName") or "My Drive")
         self.custom_name = (job.get("customName") or "").strip()
         self.mode = job.get("mode") or "normal"
         self.select_filter = (job.get("selectFilter") or "").strip()
@@ -896,6 +904,11 @@ class Mirror:
         self.share = bool(job.get("share"))
         conflict = job.get("conflict") or "rename"
         self.conflict = conflict if conflict in ("rename", "overwrite", "skip") else "rename"
+
+        self.gofile_token = ""
+        self.gofile_root_id = ""
+        self.gofile_link = ""
+        self.gofile_folders = {}
 
         items = job.get("items") or []
         if not items and job.get("fileUrl"):
@@ -1120,7 +1133,8 @@ class Mirror:
         if not force and now - self.last_tick < TICK_SECONDS:
             return
         self.last_tick = now
-        self.ensure_token()
+        if self.access_token:
+            self.ensure_token()
 
         card = build_status_card(
             job=self.job,
@@ -1357,7 +1371,182 @@ class Mirror:
         self.run_rclone(["copy", str(local), remote_path(target)], final, "Uploading..", size)
         return self.finalize({"id": target, "name": final, "mimeType": FOLDER_MIME}, final, size, True)
 
+    # ---------------- Gofile (per-task guest account) ----------------
+
+    def _gofile_pick_server(self) -> str:
+        res = http_json("https://api.gofile.io/servers", headers={"User-Agent": "curl/8.5.0"}, timeout=15)
+        servers = ((res.get("data") or {}).get("servers")) or []
+        if servers and servers[0].get("name"):
+            return f"{servers[0]['name']}.gofile.io"
+        return "upload.gofile.io"
+
+    def _gofile_upload_once(self, local: Path, host: str, path: str, folder_id: str = "", label: str = "") -> dict:
+        global cancelled
+        boundary = uuid.uuid4().hex
+        parts = []
+        if folder_id:
+            parts.append(
+                f'--{boundary}\r\nContent-Disposition: form-data; name="folderId"\r\n\r\n{folder_id}\r\n'.encode("utf-8")
+            )
+        safe_name = local.name.replace('"', "_").replace("\r", "").replace("\n", "")
+        parts.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{safe_name}"\r\nContent-Type: application/octet-stream\r\n\r\n'.encode("utf-8")
+        )
+        prefix = b"".join(parts)
+        suffix = f"\r\n--{boundary}--\r\n".encode("utf-8")
+        file_size = local.stat().st_size
+        total_len = len(prefix) + file_size + len(suffix)
+        disp_name = label or local.name
+
+        conn = http.client.HTTPSConnection(host, 443, timeout=180)
+        try:
+            conn.putrequest("POST", path)
+            conn.putheader("Content-Type", f"multipart/form-data; boundary={boundary}")
+            conn.putheader("Content-Length", str(total_len))
+            conn.putheader("User-Agent", "curl/8.5.0")
+            conn.putheader("Accept", "*/*")
+            if self.gofile_token:
+                conn.putheader("Authorization", f"Bearer {self.gofile_token}")
+            conn.endheaders()
+            conn.send(prefix)
+
+            sent = 0
+            start = time.time()
+            with open(local, "rb") as f:
+                while True:
+                    if cancelled:
+                        raise InterruptedError("Cancelled by user")
+                    chunk = f.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    conn.send(chunk)
+                    sent += len(chunk)
+                    now = time.time()
+                    elapsed = max(0.001, now - start)
+                    speed = sent / elapsed
+                    pct = (100.0 * sent / file_size) if file_size > 0 else 100.0
+                    eta = ((file_size - sent) / speed) if (speed > 0 and file_size > sent) else None
+                    self.tick(disp_name, "Uploading..", min(99.9, pct), sent, file_size, speed, eta, "Gofile Stream")
+
+            conn.send(suffix)
+            self.tick(disp_name, "Finalizing..", 99.9, file_size, file_size, 0, None, "Gofile Stream", force=True)
+            resp = conn.getresponse()
+            raw = resp.read().decode("utf-8", "replace")
+            if resp.status in (301, 302, 307, 308):
+                loc = resp.getheader("Location")
+                if loc:
+                    u = urllib.parse.urlparse(loc)
+                    if u.hostname:
+                        return self._gofile_upload_once(local, u.hostname, u.path or "/uploadfile", folder_id, label)
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                parsed = {}
+            if resp.status >= 400 or parsed.get("status") != "ok":
+                err_code = parsed.get("status") or f"HTTP {resp.status}"
+                raise RuntimeError(f"Gofile upload failed ({err_code}): {raw[:180]}")
+            return parsed.get("data") or {}
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def gofile_upload_file(self, local: Path, folder_id: str = "", label: str = "") -> dict:
+        last_err = None
+        targets = [("upload.gofile.io", "/uploadfile")]
+        for attempt in range(3):
+            if attempt > 0:
+                srv_host = self._gofile_pick_server()
+                targets.append((srv_host, "/contents/uploadfile" if srv_host != "upload.gofile.io" else "/uploadfile"))
+            host, path = targets[-1]
+            try:
+                data = self._gofile_upload_once(local, host, path, folder_id=folder_id, label=label)
+                if not self.gofile_token and data.get("guestToken"):
+                    self.gofile_token = data["guestToken"]
+                    mask_secret(self.gofile_token)
+                if not self.gofile_root_id and data.get("parentFolder"):
+                    self.gofile_root_id = data["parentFolder"]
+                    self.gofile_link = data.get("downloadPage") or f"https://gofile.io/d/{data.get('parentFolderCode', '')}"
+                    self.gofile_folders[""] = self.gofile_root_id
+                return data
+            except InterruptedError:
+                raise
+            except Exception as e:
+                last_err = e
+                time.sleep(2 * (attempt + 1))
+        raise RuntimeError(str(last_err or "Gofile upload failed"))
+
+    def gofile_create_folder(self, parent_id: str, name: str) -> str:
+        res = http_json(
+            "https://api.gofile.io/contents/createFolder",
+            data={"parentFolderId": parent_id, "folderName": name},
+            headers={"Authorization": f"Bearer {self.gofile_token}", "User-Agent": "curl/8.5.0"},
+            method="POST",
+            timeout=30,
+        )
+        fid = (res.get("data") or {}).get("id")
+        if res.get("status") != "ok" or not fid:
+            raise RuntimeError(f"Gofile folder creation failed ({res.get('status') or 'error'})")
+        return fid
+
+    def gofile_ensure_dir(self, rel_dir: Path) -> str:
+        key = str(rel_dir)
+        if key in ("", "."):
+            return self.gofile_root_id
+        if key in self.gofile_folders:
+            return self.gofile_folders[key]
+        parent_id = self.gofile_ensure_dir(rel_dir.parent)
+        fid = self.gofile_create_folder(parent_id, rel_dir.name)
+        self.gofile_folders[key] = fid
+        return fid
+
+    def upload_gofile(self, target: Path) -> dict:
+        if target.is_file():
+            size = path_size(target)
+            d = self.gofile_upload_file(target, folder_id=self.gofile_root_id)
+            return {
+                "name": target.name,
+                "link": d.get("downloadPage") or self.gofile_link,
+                "id": d.get("id", ""),
+                "size": size,
+                "status": "completed",
+                "isDir": False,
+                "shared": True,
+                "direct": "",
+            }
+
+        files = sorted(
+            [p for p in target.rglob("*") if p.is_file()],
+            key=lambda p: (len(p.relative_to(target).parts), str(p)),
+        )
+        if not files:
+            raise RuntimeError("Directory is empty — nothing to upload.")
+
+        total_size = path_size(target)
+        for f in files:
+            rel = f.relative_to(target)
+            rel_parent = rel.parent
+            if not self.gofile_root_id:
+                self.gofile_upload_file(f, folder_id="", label=str(rel))
+            else:
+                fid = self.gofile_ensure_dir(rel_parent) if str(rel_parent) != "." else self.gofile_root_id
+                self.gofile_upload_file(f, folder_id=fid, label=str(rel))
+
+        return {
+            "name": target.name,
+            "link": self.gofile_link,
+            "id": self.gofile_root_id,
+            "size": total_size,
+            "status": "completed",
+            "isDir": True,
+            "shared": True,
+            "direct": "",
+        }
+
     def upload(self, target: Path) -> dict:
+        if self.dest == "gofile":
+            return self.upload_gofile(target)
         self.ensure_token(max_age=10 * 60)
         return self.upload_dir(target) if target.is_dir() else self.upload_file(target)
 
@@ -1770,13 +1959,22 @@ class Mirror:
     def process_item(self, item: dict, item_dir: Path) -> dict:
         item = self.resolve_item(item)
         if item.get("type") == "gdrive":
+            if not self.access_token:
+                if item.get("url"):
+                    local = self.aria_download(item["url"], item_dir, out_name=self.single_name(), label=self.item_label(item))
+                    return self.process_and_upload(local)
+                rk = f"&resourcekey={urllib.parse.quote(item['resourceKey'])}" if item.get("resourceKey") else ""
+                pub_url = f"https://drive.usercontent.google.com/download?id={urllib.parse.quote(item['id'])}&export=download&confirm=t{rk}"
+                local = self.aria_download(pub_url, item_dir, out_name=self.single_name(), label=self.item_label(item))
+                return self.process_and_upload(local)
             meta = self.gdrive_meta(item)
             name = self.single_name() or meta["name"]
             mime = meta.get("mimeType", "")
-            if mime == FOLDER_MIME and self.mode != "zip":
-                return self.gdrive_clone_folder(meta, name)
-            if mime != FOLDER_MIME and (self.mode == "normal" or mime.startswith("application/vnd.google-apps.")):
-                return self.gdrive_copy_file(item, meta, name)
+            if self.dest != "gofile":
+                if mime == FOLDER_MIME and self.mode != "zip":
+                    return self.gdrive_clone_folder(meta, name)
+                if mime != FOLDER_MIME and (self.mode == "normal" or mime.startswith("application/vnd.google-apps.")):
+                    return self.gdrive_copy_file(item, meta, name)
         local = self.acquire_local(item, item_dir)
         return self.process_and_upload(local)
 
@@ -1808,8 +2006,9 @@ class Mirror:
     def run(self) -> list:
         DL_DIR.mkdir(parents=True, exist_ok=True)
         OUT_DIR.mkdir(parents=True, exist_ok=True)
-        self.start_token_server()
-        self.write_rclone_conf()
+        if self.access_token:
+            self.start_token_server()
+            self.write_rclone_conf()
 
         if self.batch and self.mode == "zip":
             return self.run_batch_zip()
@@ -1842,6 +2041,7 @@ class Mirror:
         elapsed = fmt_duration(time.time() - self.task_start)
         ok = [r for r in results if r.get("status") in ("completed", "skipped")]
         overall = "completed" if ok else "failed"
+        is_gofile = self.dest == "gofile"
 
         if not self.batch and len(results) == 1:
             r = results[0]
@@ -1852,26 +2052,36 @@ class Mirror:
                 f"<blockquote><b>{title}</b>\n\n"
                 f"<code>{html.escape(r['name'])}</code></blockquote>\n\n"
                 f"Size  ·  <code>{fmt_bytes(r.get('size', 0))}</code>\n\n"
-                f"Folder  ·  {html.escape(self.folder_name)}\n\n"
             )
-            if r.get("shared"):
-                text += "Access  ·  Anyone with the link\n\n"
+            if is_gofile:
+                text += "Dest  ·  Gofile (Guest Session)\n\nAccess  ·  Public Link\n\n"
+            else:
+                text += f"Folder  ·  {html.escape(self.folder_name)}\n\n"
+                if r.get("shared"):
+                    text += "Access  ·  Anyone with the link\n\n"
             text += f"Elapsed  ·  <code>{elapsed}</code>\n\nUser  ·  {html.escape(self.uname())}"
-            rows = [[
-                {"text": "▸  Open Folder" if r.get("isDir") else "▸  Open File", "url": r["link"], "style": "success"},
-                {"text": "Open Folder", "url": self.folder_url(), "style": "primary"},
-            ]]
-            if r.get("direct"):
-                rows.append([{"text": "⬇ Direct Download", "url": r["direct"], "style": "primary"}])
+            if is_gofile:
+                text += f"\n\n<blockquote>{GOFILE_NOTICE_HTML}</blockquote>"
+                rows = [[{"text": "▸  Open Gofile Folder" if r.get("isDir") else "▸  Open Gofile", "url": r["link"], "style": "success"}]]
+            else:
+                rows = [[
+                    {"text": "▸  Open Folder" if r.get("isDir") else "▸  Open File", "url": r["link"], "style": "success"},
+                    {"text": "Open Folder", "url": self.folder_url(), "style": "primary"},
+                ]]
+                if r.get("direct"):
+                    rows.append([{"text": "⬇ Direct Download", "url": r["direct"], "style": "primary"}])
             kb = {"inline_keyboard": rows}
         else:
             header = (
                 f"<blockquote><b>{'Batch Complete' if ok else 'Batch Failed'}</b>\n\n"
                 f"<code>{len(ok)} / {len(results)} succeeded</code></blockquote>\n\n"
             )
+            dest_line = "Dest  ·  Gofile (Guest Session)" if is_gofile else f"Folder  ·  {html.escape(self.folder_name)}"
+            warn_block = f"\n\n<blockquote>{GOFILE_NOTICE_HTML}</blockquote>" if (is_gofile and ok) else ""
             footer = (
-                f"\nFolder  ·  {html.escape(self.folder_name)}\n\n"
+                f"\n{dest_line}\n\n"
                 f"Elapsed  ·  <code>{elapsed}</code>\n\nUser  ·  {html.escape(self.uname())}"
+                f"{warn_block}"
             )
             body = ""
             for n, r in enumerate(results, 1):
@@ -1887,7 +2097,10 @@ class Mirror:
                     break
                 body += line
             text = header + body + footer
-            kb = {"inline_keyboard": [[{"text": "▸  Open Folder", "url": self.folder_url(), "style": "success"}]]}
+            if is_gofile:
+                kb = {"inline_keyboard": [[{"text": "▸  Open Gofile Folder", "url": self.gofile_link, "style": "success"}]]} if self.gofile_link else None
+            else:
+                kb = {"inline_keyboard": [[{"text": "▸  Open Folder", "url": self.folder_url(), "style": "success"}]]}
 
         _, synced_msg_id = sync_worker_state(JOB_ID)
         if synced_msg_id is not None:

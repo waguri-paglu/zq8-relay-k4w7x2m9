@@ -9,6 +9,9 @@ const FOLDER_MIME = 'application/vnd.google-apps.folder';
 const RUNNER_LIMIT_BYTES = 112 * 1024 * 1024 * 1024;
 const MAX_BATCH_URLS = 50;
 const MAX_HISTORY_ITEMS = 15;
+const GOFILE_NOTICE_HTML =
+  `⚠ <b>Temporary Storage (Gofile):</b> Files are deleted after <b>100 GB download quota</b> or <b>10 days of inactivity</b>. ` +
+  `Re-mirror from the original source to renew, or /login with your personal Google Drive for permanent storage.`;
 
 const YT_QUALITY_LABELS = {
   best: 'Best Video',
@@ -208,6 +211,7 @@ async function handleOAuthCallback(url, env) {
     tokenExpiry: Date.now() + ((tokenData.expires_in || 3500) - 120) * 1000,
     folderId: existing?.folderId || 'root',
     folderName: existing?.folderName || 'My Drive',
+    defaultDest: 'gdrive',
     buttonMode: existing?.buttonMode !== undefined ? existing.buttonMode : true,
     autoShare: !!existing?.autoShare,
     conflict: existing?.conflict || 'rename',
@@ -281,6 +285,30 @@ async function getDriveQuota(accessToken) {
 async function getUserProfile(userId, env) {
   const raw = await env.SETTINGS_KV.get(`user:${userId}`);
   return raw ? JSON.parse(raw) : null;
+}
+
+function hasDriveAuth(profile) {
+  return !!(profile && profile.refreshToken);
+}
+
+function getEffectiveProfile(userId, stored) {
+  const base = stored || {};
+  const hasDrive = hasDriveAuth(base);
+  return {
+    userId,
+    email: base.email || '',
+    refreshToken: base.refreshToken || '',
+    accessToken: base.accessToken || '',
+    tokenExpiry: base.tokenExpiry || 0,
+    folderId: base.folderId || 'root',
+    folderName: base.folderName || 'My Drive',
+    defaultDest: hasDrive ? (base.defaultDest === 'gofile' ? 'gofile' : 'gdrive') : 'gofile',
+    buttonMode: base.buttonMode !== false,
+    autoShare: !!base.autoShare,
+    conflict: base.conflict || 'rename',
+    ytQuality: base.ytQuality || 'best',
+    ytContainer: base.ytContainer || 'mp4'
+  };
 }
 
 async function saveUserProfile(userId, profile, env) {
@@ -526,6 +554,7 @@ function conflictLabel(policy) {
 }
 
 function buildTaskMenuMessage(task) {
+  const isGofile = task.dest === 'gofile';
   let extras = '';
   if (task.batch) {
     extras += `\n✓ <b>Batch:</b> <code>${task.items.length} links</code>`;
@@ -535,7 +564,7 @@ function buildTaskMenuMessage(task) {
       extras += `\n✓ <b>Channel:</b> ${escapeHtml(task.mediaAuthor)}`;
     }
   } else if (task.isDrive) {
-    extras += `\n✓ <b>Source:</b> ${task.isFolder ? 'Google Drive Folder' : 'Google Drive (Server-Side)'}`;
+    extras += `\n✓ <b>Source:</b> ${task.isFolder ? 'Google Drive Folder' : (isGofile ? 'Google Drive' : 'Google Drive (Server-Side)')}`;
   } else if (task.resolvedVia) {
     extras += `\n✓ <b>Extracted:</b> ${escapeHtml(task.resolvedVia)}`;
   }
@@ -565,26 +594,34 @@ function buildTaskMenuMessage(task) {
   if (task.archivePassword) {
     extras += `\n✓ <b>Password:</b> <code>Set (hidden)</code>`;
   }
-  if (task.share) {
-    extras += `\n✓ <b>Share:</b> Anyone with link`;
+  if (!isGofile) {
+    if (task.share) {
+      extras += `\n✓ <b>Share:</b> Anyone with link`;
+    }
+    const conf = task.conflict || 'rename';
+    if (conf !== 'rename' || task.duplicateExists) {
+      extras += `\n✓ <b>On Duplicate:</b> ${conflictLabel(conf)}`;
+    }
+    if (task.duplicateExists && !task.batch && task.mode === 'normal') {
+      extras += `\n⚠ <b>Duplicate:</b> Already exists in folder`;
+    }
   }
-  const conf = task.conflict || 'rename';
-  if (conf !== 'rename' || task.duplicateExists) {
-    extras += `\n✓ <b>On Duplicate:</b> ${conflictLabel(conf)}`;
-  }
-  if (task.duplicateExists && !task.batch && task.mode === 'normal') {
-    extras += `\n⚠ <b>Duplicate:</b> Already exists in folder`;
-  }
+
+  const destLine = isGofile
+    ? `✓ <b>Destination:</b> Gofile (New Guest Account)`
+    : `✓ <b>Custom Upload:</b> ${escapeHtml(task.folderName || 'My Drive')}`;
+  const warnBlock = isGofile ? `\n\n<blockquote>${GOFILE_NOTICE_HTML}</blockquote>` : '';
 
   return (
     `📌 <b>Choose option for your task?</b>\n\n` +
-    `✓ <b>Custom Upload:</b> ${escapeHtml(task.folderName || 'My Drive')}${extras}\n\n` +
+    `${destLine}${extras}${warnBlock}\n\n` +
     `⏰ <b>Timeout:</b> <code>2m40s</code>`
   );
 }
 
 function buildTaskMenuKeyboard(task) {
   const tid = task.taskId;
+  const isGofile = task.dest === 'gofile';
   const extLabel = task.mode === 'extract' ? '✓ Extract' : 'Extract';
   const zipLabel = task.mode === 'zip' ? '✓ Create ZIP' : 'Create ZIP';
   const renLabel = task.batch && task.mode === 'zip'
@@ -594,19 +631,36 @@ function buildTaskMenuKeyboard(task) {
   const passLabel = task.archivePassword ? '✓ Password' : 'Password';
   const shareLabel = task.share ? '✓ Share Link' : 'Share Link';
   const confText = `Duplicate: ${conflictLabel(task.conflict || 'rename')}`;
-  const folderShort = truncate(task.folderName || 'My Drive', 14);
+  const folderShort = truncate(task.driveFolderName || task.folderName || 'My Drive', 14);
+  const destBtnText = isGofile ? '☁️ Dest: Gofile (Temp)' : '☁️ Dest: Google Drive';
 
   const rows = [
     [{ text: '▶️ START MIRROR', callback_data: `tm_start:${tid}`, style: 'success' }]
   ];
 
-  if (!task.batch || task.mode === 'zip') {
-    rows.push([
-      { text: renLabel, callback_data: `tm_ren:${tid}` },
-      { text: `Upload: ${folderShort}`, callback_data: `tm_dir:${tid}` }
-    ]);
+  const canRename = !task.batch || task.mode === 'zip';
+  if (isGofile) {
+    if (canRename) {
+      rows.push([
+        { text: renLabel, callback_data: `tm_ren:${tid}` },
+        { text: destBtnText, callback_data: `tm_dest:${tid}`, style: 'primary' }
+      ]);
+    } else {
+      rows.push([{ text: destBtnText, callback_data: `tm_dest:${tid}`, style: 'primary' }]);
+    }
+    if (task.hasDrive) {
+      rows.push([{ text: `Drive Folder: ${folderShort}`, callback_data: `tm_dir:${tid}` }]);
+    }
   } else {
-    rows.push([{ text: `Upload: ${folderShort}`, callback_data: `tm_dir:${tid}` }]);
+    rows.push([{ text: destBtnText, callback_data: `tm_dest:${tid}`, style: 'primary' }]);
+    if (canRename) {
+      rows.push([
+        { text: renLabel, callback_data: `tm_ren:${tid}` },
+        { text: `Upload: ${folderShort}`, callback_data: `tm_dir:${tid}` }
+      ]);
+    } else {
+      rows.push([{ text: `Upload: ${folderShort}`, callback_data: `tm_dir:${tid}` }]);
+    }
   }
 
   if (task.isYtdl) {
@@ -680,10 +734,12 @@ function buildTaskMenuKeyboard(task) {
     }
   }
 
-  rows.push([
-    { text: shareLabel, callback_data: `tm_share:${tid}` },
-    { text: confText, callback_data: `tm_confmenu:${tid}` }
-  ]);
+  if (!isGofile) {
+    rows.push([
+      { text: shareLabel, callback_data: `tm_share:${tid}` },
+      { text: confText, callback_data: `tm_confmenu:${tid}` }
+    ]);
+  }
 
   rows.push([
     { text: '↩️ Back', callback_data: `tm_back:${tid}`, style: 'primary' },
@@ -803,7 +859,11 @@ async function handleTelegramUpdate(update, env) {
 
   if (text === '/logout') {
     await env.SETTINGS_KV.delete(`user:${userId}`);
-    await sendMessage(chatId, `<blockquote><b>Disconnected</b>\n\nYour Google Drive credentials have been removed.</blockquote>`, env);
+    await sendMessage(
+      chatId,
+      `<blockquote><b>Disconnected</b>\n\nYour Google Drive credentials have been removed. You can still mirror to Gofile (temporary guest storage) anytime.</blockquote>`,
+      env
+    );
     return;
   }
 
@@ -824,10 +884,10 @@ async function handleTelegramUpdate(update, env) {
   }
 
   if (text === '/settings') {
-    const profile = await getUserProfile(userId, env);
-    if (!profile) {
-      await sendMessage(chatId, `Please run /login first.`, env);
-      return;
+    const stored = await getUserProfile(userId, env);
+    const profile = getEffectiveProfile(userId, stored);
+    if (!stored) {
+      await saveUserProfile(userId, profile, env);
     }
     await sendSettingsMenu(chatId, userId, profile, null, env);
     return;
@@ -876,18 +936,6 @@ async function handleDocumentMessage(msg, env) {
     return;
   }
 
-  const profile = await getUserProfile(userId, env);
-  if (!profile || !profile.refreshToken) {
-    const authUrl = await createOAuthUrl(chatId, userId, username, env);
-    await sendMessage(
-      chatId,
-      `<blockquote><b>Authentication Required</b></blockquote>\n\nConnect your Google Drive account to mirror links from a text file:`,
-      env,
-      { inline_keyboard: [[{ text: '▸  Connect Google Drive', url: authUrl, style: 'primary' }]] }
-    );
-    return;
-  }
-
   if (doc.file_size && doc.file_size > 512 * 1024) {
     await sendMessage(chatId, `<blockquote><b>File Too Large</b>\n\nBatch <code>.txt</code> files must be under <code>512 KiB</code>.</blockquote>`, env);
     return;
@@ -926,18 +974,10 @@ async function handleDocumentMessage(msg, env) {
 async function startTaskFromUrls(chatId, userId, username, replyToMsgId, urls, env, opts = {}) {
   const forceYtdl = !!opts.forceYtdl;
   const editExistingMsgId = opts.editMsgId || null;
-  const profile = await getUserProfile(userId, env);
-  if (!profile || !profile.refreshToken) {
-    const authUrl = await createOAuthUrl(chatId, userId, username, env);
-    await sendMessage(
-      chatId,
-      `<blockquote><b>Authentication Required</b></blockquote>\n\n` +
-        `Connect your Google Drive account to start mirroring files:`,
-      env,
-      { inline_keyboard: [[{ text: '▸  Connect Google Drive', url: authUrl, style: 'primary' }]] }
-    );
-    return;
-  }
+  const storedProfile = await getUserProfile(userId, env);
+  const profile = getEffectiveProfile(userId, storedProfile);
+  const hasDrive = hasDriveAuth(storedProfile);
+  const defaultDest = hasDrive ? (profile.defaultDest === 'gofile' ? 'gofile' : 'gdrive') : 'gofile';
 
   const isBatch = urls.length > 1;
   const allMedia = forceYtdl || urls.every(u => isMediaSiteUrl(u));
@@ -967,7 +1007,7 @@ async function startTaskFromUrls(chatId, userId, username, replyToMsgId, urls, e
     let accessToken = null;
 
     if (!ytdlUrl) {
-      accessToken = await getValidAccessToken(userId, env);
+      accessToken = hasDrive ? await getValidAccessToken(userId, env) : null;
       resolved = await resolveAndInspectInput(rawUrl, accessToken);
 
       if (resolved.kind === 'ytdl') {
@@ -1026,8 +1066,12 @@ async function startTaskFromUrls(chatId, userId, username, replyToMsgId, urls, e
         fileSize: 0,
         contentType: 'video/mp4',
         acceptRanges: true,
-        folderId: profile.folderId || 'root',
-        folderName: profile.folderName || 'My Drive',
+        dest: defaultDest,
+        hasDrive,
+        driveFolderId: profile.folderId || 'root',
+        driveFolderName: profile.folderName || 'My Drive',
+        folderId: defaultDest === 'gofile' ? '' : (profile.folderId || 'root'),
+        folderName: defaultDest === 'gofile' ? 'Gofile (Guest)' : (profile.folderName || 'My Drive'),
         mode: 'normal',
         selectFilter: '',
         archivePassword: '',
@@ -1043,7 +1087,7 @@ async function startTaskFromUrls(chatId, userId, username, replyToMsgId, urls, e
 
       let duplicateExists = false;
       try {
-        if (accessToken) {
+        if (defaultDest === 'gdrive' && accessToken) {
           const existing = await findDriveExisting(accessToken, profile.folderId || 'root', verification.fileName);
           duplicateExists = existing.length > 0;
         }
@@ -1087,8 +1131,12 @@ async function startTaskFromUrls(chatId, userId, username, replyToMsgId, urls, e
         fileSize: verification.sizeBytes || 0,
         contentType: verification.contentType || 'application/octet-stream',
         acceptRanges: verification.acceptRanges || false,
-        folderId: profile.folderId || 'root',
-        folderName: profile.folderName || 'My Drive',
+        dest: defaultDest,
+        hasDrive,
+        driveFolderId: profile.folderId || 'root',
+        driveFolderName: profile.folderName || 'My Drive',
+        folderId: defaultDest === 'gofile' ? '' : (profile.folderId || 'root'),
+        folderName: defaultDest === 'gofile' ? 'Gofile (Guest)' : (profile.folderName || 'My Drive'),
         mode: 'normal',
         selectFilter: '',
         archivePassword: '',
@@ -1138,8 +1186,12 @@ async function startTaskFromUrls(chatId, userId, username, replyToMsgId, urls, e
       fileSize: 0,
       contentType: 'application/octet-stream',
       acceptRanges: false,
-      folderId: profile.folderId || 'root',
-      folderName: profile.folderName || 'My Drive',
+      dest: defaultDest,
+      hasDrive,
+      driveFolderId: profile.folderId || 'root',
+      driveFolderName: profile.folderName || 'My Drive',
+      folderId: defaultDest === 'gofile' ? '' : (profile.folderId || 'root'),
+      folderName: defaultDest === 'gofile' ? 'Gofile (Guest)' : (profile.folderName || 'My Drive'),
       mode: 'normal',
       selectFilter: '',
       archivePassword: '',
@@ -1182,7 +1234,7 @@ async function handleUserPromptInput(chatId, userId, text, promptState, msgId, e
     }
     const task = JSON.parse(raw);
     task.customName = text.replace(/[/\\?%*:|"<>]/g, '_').trim();
-    if (!task.batch && task.customName) {
+    if (!task.batch && task.customName && task.dest !== 'gofile') {
       const accessToken = await getValidAccessToken(userId, env);
       if (accessToken) {
         const existing = await findDriveExisting(accessToken, task.folderId || 'root', task.customName);
@@ -1401,6 +1453,10 @@ async function handleCallbackQuery(cb, env) {
         if (tRaw) {
           const task = JSON.parse(tRaw);
           if (String(task.userId) === String(userId)) {
+            task.dest = 'gdrive';
+            task.hasDrive = true;
+            task.driveFolderId = bState.currentId;
+            task.driveFolderName = bState.currentName;
             task.folderId = bState.currentId;
             task.folderName = bState.currentName;
             if (!task.batch) {
@@ -1685,9 +1741,64 @@ async function handleCallbackQuery(cb, env) {
       return;
     }
 
+    if (action === 'tm_dest') {
+      const profile = await getUserProfile(userId, env);
+      if (!hasDriveAuth(profile)) {
+        const uname = cb.from.username || cb.from.first_name || 'User';
+        const authUrl = await createOAuthUrl(chatId, userId, uname, env);
+        await answerCb(cb.id, 'Connect Google Drive for permanent storage', false, env);
+        await sendMessage(
+          chatId,
+          `<blockquote><b>Permanent Storage — Google Drive</b></blockquote>\n\n` +
+            `${GOFILE_NOTICE_HTML}\n\n` +
+            `Connect your personal Google Drive below to store files permanently:`,
+          env,
+          { inline_keyboard: [[{ text: '▸  Connect Google Drive', url: authUrl, style: 'primary' }]] }
+        );
+        return;
+      }
+      task.hasDrive = true;
+      if (task.dest === 'gofile') {
+        task.dest = 'gdrive';
+        task.folderId = task.driveFolderId || profile.folderId || 'root';
+        task.folderName = task.driveFolderName || profile.folderName || 'My Drive';
+        if (!task.batch) {
+          const accessToken = await getValidAccessToken(userId, env);
+          if (accessToken) {
+            const ex = await findDriveExisting(accessToken, task.folderId, task.customName || task.detectedName);
+            task.duplicateExists = ex.length > 0;
+          }
+        }
+      } else {
+        task.dest = 'gofile';
+        task.driveFolderId = task.folderId || profile.folderId || 'root';
+        task.driveFolderName = task.folderName || profile.folderName || 'My Drive';
+        task.folderId = '';
+        task.folderName = 'Gofile (Guest)';
+        task.duplicateExists = false;
+      }
+      await env.SETTINGS_KV.put(`task:${tid}`, JSON.stringify(task), { expirationTtl: 7200 });
+      await editMessage(chatId, msgId, buildTaskMenuMessage(task), env, buildTaskMenuKeyboard(task));
+      await answerCb(cb.id, `Destination: ${task.dest === 'gofile' ? 'Gofile (Temp)' : 'Google Drive'}`, false, env);
+      return;
+    }
+
     if (action === 'tm_dir') {
+      const profile = await getUserProfile(userId, env);
+      if (!hasDriveAuth(profile)) {
+        const uname = cb.from.username || cb.from.first_name || 'User';
+        const authUrl = await createOAuthUrl(chatId, userId, uname, env);
+        await answerCb(cb.id, 'Connect Google Drive first', false, env);
+        await sendMessage(
+          chatId,
+          `Connect your Google Drive account to choose a Drive folder.`,
+          env,
+          { inline_keyboard: [[{ text: '▸  Connect Google Drive', url: authUrl, style: 'primary' }]] }
+        );
+        return;
+      }
       await answerCb(cb.id, 'Opening Folder Browser', false, env);
-      await openFolderBrowser(chatId, userId, task.folderId || 'root', msgId, tid, env, 0);
+      await openFolderBrowser(chatId, userId, task.driveFolderId || task.folderId || 'root', msgId, tid, env, 0);
       return;
     }
 
@@ -1712,11 +1823,10 @@ async function handleCallbackQuery(cb, env) {
     }
 
     if (action === 'tm_nobtn') {
-      const profile = await getUserProfile(userId, env);
-      if (profile) {
-        profile.buttonMode = false;
-        await saveUserProfile(userId, profile, env);
-      }
+      const stored = await getUserProfile(userId, env);
+      const profile = getEffectiveProfile(userId, stored);
+      profile.buttonMode = false;
+      await saveUserProfile(userId, profile, env);
       await answerCb(cb.id, 'ButtonMode disabled. Starting...', false, env);
       await launchMirrorTask(task, env);
       return;
@@ -1768,8 +1878,19 @@ async function handleCallbackQuery(cb, env) {
   }
 
   if (data.startsWith('cfg_')) {
-    const profile = await getUserProfile(userId, env);
-    if (!profile) return;
+    const stored = await getUserProfile(userId, env);
+    const profile = getEffectiveProfile(userId, stored);
+    if (data === 'cfg_toggle_dest') {
+      if (!hasDriveAuth(stored)) {
+        await answerCb(cb.id, 'Connect Google Drive via /login first', true, env);
+        return;
+      }
+      profile.defaultDest = profile.defaultDest === 'gofile' ? 'gdrive' : 'gofile';
+      await saveUserProfile(userId, profile, env);
+      await answerCb(cb.id, `Default Dest: ${profile.defaultDest === 'gofile' ? 'Gofile (Temp)' : 'Google Drive'}`, false, env);
+      await sendSettingsMenu(chatId, userId, profile, msgId, env);
+      return;
+    }
     if (data === 'cfg_toggle_btn') {
       profile.buttonMode = !profile.buttonMode;
       await saveUserProfile(userId, profile, env);
@@ -1878,6 +1999,18 @@ async function handleCallbackQuery(cb, env) {
       return;
     }
     if (data === 'cfg_dir') {
+      if (!hasDriveAuth(stored)) {
+        const uname = cb.from.username || cb.from.first_name || 'User';
+        const authUrl = await createOAuthUrl(chatId, userId, uname, env);
+        await answerCb(cb.id, 'Connect Google Drive first', false, env);
+        await sendMessage(
+          chatId,
+          `Connect your Google Drive account first to browse Drive folders.`,
+          env,
+          { inline_keyboard: [[{ text: '▸  Connect Google Drive', url: authUrl, style: 'primary' }]] }
+        );
+        return;
+      }
       await answerCb(cb.id, 'Opening directory browser', false, env);
       await openFolderBrowser(chatId, userId, profile.folderId || 'root', msgId, null, env, 0);
       return;
@@ -1891,8 +2024,11 @@ async function handleCallbackQuery(cb, env) {
 
 async function launchMirrorTask(task, env) {
   const { chatId, userId, taskId, menuMsgId } = task;
+  const dest = task.dest === 'gofile' ? 'gofile' : 'gdrive';
+  const isGofile = dest === 'gofile';
   const accessToken = await getValidAccessToken(userId, env);
-  if (!accessToken) {
+
+  if (!isGofile && !accessToken) {
     await editMessage(
       chatId,
       menuMsgId,
@@ -1902,10 +2038,10 @@ async function launchMirrorTask(task, env) {
     return;
   }
 
-  const quota = await getDriveQuota(accessToken);
+  const quota = !isGofile && accessToken ? await getDriveQuota(accessToken) : null;
   const fileSize = task.fileSize || 0;
 
-  if (!task.batch && fileSize > 0 && quota && quota.free !== Infinity && fileSize > quota.free) {
+  if (!isGofile && !task.batch && fileSize > 0 && quota && quota.free !== Infinity && fileSize > quota.free) {
     const msg =
       `<blockquote><b>Insufficient Drive Storage</b>\n\n` +
       `<code>${escapeHtml(task.customName || task.detectedName)}</code></blockquote>\n\n` +
@@ -1918,7 +2054,7 @@ async function launchMirrorTask(task, env) {
 
   // Fast server-side copy directly in Worker for single Drive file in normal mode
   const singleItem = !task.batch && task.items?.length === 1 ? task.items[0] : null;
-  if (singleItem && singleItem.type === 'gdrive' && !task.isFolder && task.mode === 'normal') {
+  if (!isGofile && singleItem && singleItem.type === 'gdrive' && !task.isFolder && task.mode === 'normal') {
     await executeDirectDriveCopy(task, singleItem, accessToken, env);
     return;
   }
@@ -1956,6 +2092,10 @@ async function launchMirrorTask(task, env) {
     ? `Batch (${task.items.length} links)`
     : (task.customName || task.detectedName);
 
+  const destLines = isGofile
+    ? `├ Dest : Gofile (Fresh Guest)\n├ Quota : <code>100GB DL / 10d idle</code>\n`
+    : `├ Folder : ${escapeHtml(task.folderName)}\n├ Drive Free : <code>${freeDriveStr}</code>\n`;
+
   const bootText =
     `${fallbackNotice}` +
     `<blockquote>📄 <b>Name :</b> <code>${escapeHtml(displayTitle)}</code></blockquote>\n\n` +
@@ -1964,8 +2104,7 @@ async function launchMirrorTask(task, env) {
     `├ By : @${escapeHtml(task.username)}\n` +
     `├ UserID : <code>[${userId}]</code>\n` +
     `├ Size : <code>${fileSize > 0 ? fmtBytes(fileSize) : 'Unknown'}</code>\n` +
-    `├ Folder : ${escapeHtml(task.folderName)}\n` +
-    `├ Drive Free : <code>${freeDriveStr}</code>\n` +
+    `${destLines}` +
     `├ Mode : <code>${modeTag}</code>\n` +
     `└ ⛔ /cancel_${taskId}\n\n` +
     `____________________________\n\n` +
@@ -1996,8 +2135,9 @@ async function launchMirrorTask(task, env) {
     detectedName: displayTitle,
     customName: task.customName,
     fileSize: task.fileSize,
-    folderId: task.folderId,
-    folderName: task.folderName,
+    dest,
+    folderId: isGofile ? '' : task.folderId,
+    folderName: isGofile ? 'Gofile (Guest)' : task.folderName,
     mode: task.mode,
     selectFilter: task.selectFilter,
     archivePassword: task.archivePassword || '',
@@ -2204,12 +2344,16 @@ async function handleInternalRunner(request, path, env) {
       await env.SETTINGS_KV.put(`job:${jobId}`, JSON.stringify(job), { expirationTtl: 25200 });
     }
     const tokenInfo = await getValidTokenInfo(job.userId, env, false);
-    if (!tokenInfo) {
+    if (job.dest !== 'gofile' && !tokenInfo) {
       return jsonResponse({ ok: false, error: 'Could not mint Google access token for user' }, 400);
     }
     return jsonResponse({
       ok: true,
-      job: { ...job, accessToken: tokenInfo.accessToken, tokenExpiry: tokenInfo.tokenExpiry }
+      job: {
+        ...job,
+        accessToken: tokenInfo?.accessToken || '',
+        tokenExpiry: tokenInfo?.tokenExpiry || null
+      }
     });
   }
 
@@ -2391,7 +2535,7 @@ async function sendActiveTasks(chatId, userId, env) {
     const name = escapeHtml(j.customName || j.detectedName || 'Task');
     const state = escapeHtml(j.status || 'starting');
     const userTag = j.username ? `@${escapeHtml(j.username)}` : `<code>${escapeHtml(String(j.userId || userId))}</code>`;
-    const folder = escapeHtml(j.folderName || 'My Drive');
+    const folder = escapeHtml(j.dest === 'gofile' ? 'Gofile (Guest)' : (j.folderName || 'My Drive'));
 
     const cardText = j.lastCardHtml || (
       `<code>${name}</code>\n\n` +
@@ -2424,26 +2568,34 @@ async function sendActiveTasks(chatId, userId, env) {
 // ============================================================================
 
 async function sendStartScreen(chatId, userId, username, env) {
-  const profile = await getUserProfile(userId, env);
-  if (!profile || !profile.refreshToken) {
+  const stored = await getUserProfile(userId, env);
+  const profile = getEffectiveProfile(userId, stored);
+  if (!hasDriveAuth(stored)) {
     const authUrl = await createOAuthUrl(chatId, userId, username, env);
     const text =
       `<blockquote><b>Cloud Mirror Engine</b>\n\n` +
-      `High-Speed On-Demand Google Drive Transfer</blockquote>\n\n` +
+      `Free On-Demand Mirroring (Gofile + Google Drive)</blockquote>\n\n` +
+      `Destination  ·  <b>Gofile (No Login Required)</b> — Fresh guest account per task\n\n` +
       `Bandwidth  ·  Up to <code>1.8 Gbps</code> (16x Aria2c)\n\n` +
-      `Workspace  ·  <code>115 GiB</code> Dedicated Node\n\n` +
-      `Features  ·  Direct URLs · Drive Copy · yt-dlp · Batch · Extract · ZIP\n\n` +
+      `Features  ·  Direct URLs · yt-dlp · Batch · <code>.txt</code> Lists · Extract · ZIP\n\n` +
       `Telemetry  ·  <code>2.5s</code> Live Progress & System Stats\n\n` +
-      `<i>Connect your Google Drive account below to begin:</i>`;
+      `<blockquote>${GOFILE_NOTICE_HTML}</blockquote>\n\n` +
+      `<b>Commands</b>\n\n` +
+      `<code>/m &lt;link&gt;</code> — Mirror URLs or send any link / <code>.txt</code> list directly\n\n` +
+      `<code>/yt &lt;link&gt;</code> — Download videos / audio / playlists via yt-dlp\n\n` +
+      `/tasks — View active transfers    /history — Recent transfers\n\n` +
+      `/settings — Preferences    /login — Connect Google Drive (Permanent)`;
     await sendMessage(chatId, text, env, {
-      inline_keyboard: [[{ text: '▸  Connect Google Drive', url: authUrl, style: 'primary' }]]
+      inline_keyboard: [[{ text: '▸  Connect Google Drive (Permanent)', url: authUrl, style: 'primary' }]]
     });
     return;
   }
 
+  const destLabel = profile.defaultDest === 'gofile' ? 'Gofile (Temp Guest)' : 'Google Drive (Permanent)';
   const text =
     `<blockquote><b>Cloud Mirror Engine</b>\n\n` +
     `<code>${escapeHtml(profile.email)}</code></blockquote>\n\n` +
+    `Default Dest  ·  ${destLabel}\n\n` +
     `Upload Folder  ·  ${escapeHtml(profile.folderName || 'My Drive')}\n\n` +
     `Options Menu  ·  ${profile.buttonMode !== false ? 'Enabled' : 'Disabled'}\n\n` +
     `Auto Share  ·  ${profile.autoShare ? 'Enabled' : 'Disabled'}    Duplicate  ·  ${conflictLabel(profile.conflict || 'rename')}\n\n` +
@@ -2467,29 +2619,44 @@ async function sendStartScreen(chatId, userId, username, env) {
 }
 
 async function sendSettingsMenu(chatId, userId, profile, editMsgId, env) {
-  const yq = ytQualityLabel(profile.ytQuality || 'best');
-  const yc = ytContainerLabel(profile.ytContainer || 'mp4');
+  const hasDrive = hasDriveAuth(profile);
+  const eff = getEffectiveProfile(userId, profile);
+  const yq = ytQualityLabel(eff.ytQuality || 'best');
+  const yc = ytContainerLabel(eff.ytContainer || 'mp4');
+  const destStr = eff.defaultDest === 'gofile' ? 'Gofile (Temp · Fresh Guest)' : 'Google Drive (Permanent)';
+  const acctLine = hasDrive ? `<code>${escapeHtml(eff.email)}</code>` : `<i>Guest Mode (No Google Drive Linked)</i>`;
   const text =
     `<blockquote><b>Preferences</b>\n\n` +
-    `<code>${escapeHtml(profile.email)}</code></blockquote>\n\n` +
-    `Target Folder  ·  ${escapeHtml(profile.folderName || 'My Drive')}\n\n` +
-    `ButtonMode  ·  ${profile.buttonMode !== false ? 'Enabled' : 'Disabled'}\n\n` +
-    `Auto Share  ·  ${profile.autoShare ? 'Enabled (Anyone with link)' : 'Disabled'}\n\n` +
-    `On Duplicate  ·  ${conflictLabel(profile.conflict || 'rename')}\n\n` +
+    `${acctLine}</blockquote>\n\n` +
+    `Default Dest  ·  ${destStr}\n\n` +
+    (hasDrive ? `Target Folder  ·  ${escapeHtml(eff.folderName || 'My Drive')}\n\n` : '') +
+    `ButtonMode  ·  ${eff.buttonMode !== false ? 'Enabled' : 'Disabled'}\n\n` +
+    (hasDrive
+      ? `Auto Share  ·  ${eff.autoShare ? 'Enabled (Anyone with link)' : 'Disabled'}\n\n` +
+        `On Duplicate  ·  ${conflictLabel(eff.conflict || 'rename')}\n\n`
+      : '') +
     `Media (yt-dlp)  ·  <code>${yq} · ${yc}</code>`;
-  const kb = {
-    inline_keyboard: [
-      [{ text: 'Browse / Change Folder', callback_data: 'cfg_dir', style: 'primary' }],
-      [
-        { text: `ButtonMode: ${profile.buttonMode !== false ? 'ON' : 'OFF'}`, callback_data: 'cfg_toggle_btn' },
-        { text: `Auto Share: ${profile.autoShare ? 'ON' : 'OFF'}`, callback_data: 'cfg_toggle_share' }
-      ],
-      [
-        { text: `Duplicate: ${conflictLabel(profile.conflict || 'rename')}`, callback_data: 'cfg_conf_menu' },
-        { text: `🎬 Media: ${yq}`, callback_data: 'cfg_yt_menu' }
-      ]
-    ]
-  };
+
+  const rows = [];
+  if (hasDrive) {
+    rows.push([{ text: `☁️ Default Dest: ${eff.defaultDest === 'gofile' ? 'Gofile' : 'Google Drive'}`, callback_data: 'cfg_toggle_dest', style: 'primary' }]);
+    rows.push([{ text: 'Browse / Change Folder', callback_data: 'cfg_dir', style: 'primary' }]);
+    rows.push([
+      { text: `ButtonMode: ${eff.buttonMode !== false ? 'ON' : 'OFF'}`, callback_data: 'cfg_toggle_btn' },
+      { text: `Auto Share: ${eff.autoShare ? 'ON' : 'OFF'}`, callback_data: 'cfg_toggle_share' }
+    ]);
+    rows.push([
+      { text: `Duplicate: ${conflictLabel(eff.conflict || 'rename')}`, callback_data: 'cfg_conf_menu' },
+      { text: `🎬 Media: ${yq}`, callback_data: 'cfg_yt_menu' }
+    ]);
+  } else {
+    rows.push([
+      { text: `ButtonMode: ${eff.buttonMode !== false ? 'ON' : 'OFF'}`, callback_data: 'cfg_toggle_btn' },
+      { text: `🎬 Media: ${yq}`, callback_data: 'cfg_yt_menu', style: 'primary' }
+    ]);
+  }
+
+  const kb = { inline_keyboard: rows };
   if (editMsgId) {
     await editMessage(chatId, editMsgId, text, env, kb);
   } else {
@@ -2840,7 +3007,22 @@ async function resolveAndInspectInput(rawUrl, accessToken) {
     const driveInfo = parseDriveUrl(currentUrl);
     if (driveInfo) {
       if (!accessToken) {
-        return { kind: 'error', reason: 'Google Drive session expired. Run /login again.' };
+        if (driveInfo.isFolder) {
+          return { kind: 'error', reason: 'Google Drive folders require /login to read folder contents.' };
+        }
+        const rk = driveInfo.resourceKey ? `&resourcekey=${encodeURIComponent(driveInfo.resourceKey)}` : '';
+        const pubUrl = `https://drive.usercontent.google.com/download?id=${encodeURIComponent(driveInfo.id)}&export=download&confirm=t${rk}`;
+        const v = await verifyDirectLink(pubUrl);
+        if (v.valid) {
+          return {
+            kind: 'url',
+            verification: v,
+            finalUrl: pubUrl,
+            sourceUrl: '',
+            resolvedVia: [...viaChain, 'Public Drive'].filter(Boolean).join(' → ')
+          };
+        }
+        return { kind: 'error', reason: 'This Google Drive link requires /login (private or confirmation-gated).' };
       }
       const verification = await inspectDriveLink(driveInfo, accessToken);
       if (!verification.valid) {
