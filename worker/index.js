@@ -761,13 +761,14 @@ async function handleTelegramUpdate(update, env) {
   const userId = msg.from.id;
   const username = msg.from.username || msg.from.first_name || 'User';
 
-  if (msg.document && !msg.text) {
+  if (msg.document && !msg.text && !msg.caption) {
     await handleDocumentMessage(msg, env);
     return;
   }
 
-  if (!msg.text) return;
-  const text = msg.text.trim();
+  const rawText = msg.text || msg.caption || '';
+  if (!rawText) return;
+  const text = rawText.trim();
 
   const promptRaw = await env.SETTINGS_KV.get(`prompt:${userId}`);
   if (promptRaw) {
@@ -848,12 +849,13 @@ async function handleTelegramUpdate(update, env) {
     return;
   }
 
-  const isYtCmd = text === '/yt' || text === '/ytdl' || text.startsWith('/yt ') || text.startsWith('/ytdl ') || text.startsWith('/yt@') || text.startsWith('/ytdl@');
+  const isYtCmd = /^\/yt(?:dl)?(?:@\S+)?(?:\s|$)/i.test(text);
+  const isMCmd = /^\/m(?:@\S+)?(?:\s|$)/i.test(text);
   const urls = extractUrls(text);
   if (!urls.length) {
     if (isYtCmd) {
       await sendMessage(chatId, `Usage  ·  <code>/yt https://youtube.com/watch?v=...</code>\n\n<i>Works with YouTube, Instagram, TikTok, X, Twitch, Vimeo, SoundCloud, and 1000+ media sites.</i>`, env);
-    } else if (text.startsWith('/m')) {
+    } else if (isMCmd) {
       await sendMessage(chatId, `Usage  ·  <code>/m https://example.com/file.mkv</code>\n\n<i>You can also send multiple links, a </i><code>.txt</code><i> file of URLs, or </i><code>/yt &lt;url&gt;</code><i> for media sites.</i>`, env);
     }
     return;
@@ -960,54 +962,17 @@ async function startTaskFromUrls(chatId, userId, username, replyToMsgId, urls, e
 
   if (!isBatch) {
     const rawUrl = urls[0];
-    const useYtdl = forceYtdl || isMediaSiteUrl(rawUrl);
+    let ytdlUrl = (forceYtdl || isMediaSiteUrl(rawUrl)) ? rawUrl : '';
+    let resolved = null;
+    let accessToken = null;
 
-    if (useYtdl) {
-      const oembed = await fetchMediaOEmbed(rawUrl);
-      const detectedTitle = oembed?.title || guessNameFromUrl(rawUrl) || 'Media';
-      task = {
-        taskId,
-        userId,
-        username,
-        chatId,
-        replyToMsgId,
-        menuMsgId: checkingMsgId,
-        fileUrl: rawUrl,
-        items: [{ type: 'ytdl', url: rawUrl, name: detectedTitle }],
-        batch: false,
-        isDrive: false,
-        isFolder: false,
-        isYtdl: true,
-        mediaAuthor: oembed?.author || '',
-        ytQuality: profile.ytQuality || 'best',
-        ytContainer: profile.ytContainer || 'mp4',
-        ytSubs: false,
-        ytSubLang: 'en',
-        ytMeta: true,
-        ytSponsorBlock: false,
-        ytPlaylist: isPlaylistUrl(rawUrl) ? 'all' : 'single',
-        ytPlaylistItems: '',
-        ytTrim: '',
-        detectedName: detectedTitle,
-        customName: '',
-        fileSize: 0,
-        contentType: 'video/mp4',
-        acceptRanges: true,
-        folderId: profile.folderId || 'root',
-        folderName: profile.folderName || 'My Drive',
-        mode: 'normal',
-        selectFilter: '',
-        archivePassword: '',
-        share: !!profile.autoShare,
-        conflict: profile.conflict || 'rename',
-        duplicateExists: false,
-        createdAt: Date.now()
-      };
-    } else {
-      const accessToken = await getValidAccessToken(userId, env);
-      const resolved = await resolveAndInspectInput(rawUrl, accessToken);
+    if (!ytdlUrl) {
+      accessToken = await getValidAccessToken(userId, env);
+      resolved = await resolveAndInspectInput(rawUrl, accessToken);
 
-      if (resolved.kind === 'error') {
+      if (resolved.kind === 'ytdl') {
+        ytdlUrl = resolved.finalUrl || rawUrl;
+      } else if (resolved.kind === 'error') {
         const errText =
           `<blockquote><b>Invalid Stream Link</b></blockquote>\n\n` +
           `Reason  ·  <code>${escapeHtml(resolved.reason)}</code>\n\n` +
@@ -1028,7 +993,50 @@ async function startTaskFromUrls(chatId, userId, username, replyToMsgId, urls, e
         }
         return;
       }
+    }
 
+    if (ytdlUrl) {
+      const oembed = await fetchMediaOEmbed(ytdlUrl);
+      const detectedTitle = oembed?.title || guessNameFromUrl(ytdlUrl) || 'Media';
+      task = {
+        taskId,
+        userId,
+        username,
+        chatId,
+        replyToMsgId,
+        menuMsgId: checkingMsgId,
+        fileUrl: ytdlUrl,
+        items: [{ type: 'ytdl', url: ytdlUrl, name: detectedTitle }],
+        batch: false,
+        isDrive: false,
+        isFolder: false,
+        isYtdl: true,
+        mediaAuthor: oembed?.author || '',
+        ytQuality: profile.ytQuality || 'best',
+        ytContainer: profile.ytContainer || 'mp4',
+        ytSubs: false,
+        ytSubLang: 'en',
+        ytMeta: true,
+        ytSponsorBlock: false,
+        ytPlaylist: isPlaylistUrl(ytdlUrl) ? 'all' : 'single',
+        ytPlaylistItems: '',
+        ytTrim: '',
+        detectedName: detectedTitle,
+        customName: '',
+        fileSize: 0,
+        contentType: 'video/mp4',
+        acceptRanges: true,
+        folderId: profile.folderId || 'root',
+        folderName: profile.folderName || 'My Drive',
+        mode: 'normal',
+        selectFilter: '',
+        archivePassword: '',
+        share: !!profile.autoShare,
+        conflict: profile.conflict || 'rename',
+        duplicateExists: false,
+        createdAt: Date.now()
+      };
+    } else {
       const verification = resolved.verification;
       const isDrive = resolved.kind === 'gdrive';
       const fileUrl = resolved.finalUrl;
@@ -2821,6 +2829,14 @@ async function resolveAndInspectInput(rawUrl, accessToken) {
   let fetches = 0;
 
   for (let hop = 0; hop < 10 && fetches < 14; hop++) {
+    if (isMediaSiteUrl(currentUrl)) {
+      return {
+        kind: 'ytdl',
+        finalUrl: currentUrl,
+        resolvedVia: viaChain.join(' → ')
+      };
+    }
+
     const driveInfo = parseDriveUrl(currentUrl);
     if (driveInfo) {
       if (!accessToken) {
@@ -2919,6 +2935,9 @@ async function resolveAndInspectInput(rawUrl, accessToken) {
       const finalPageUrl = pageRes.url || currentUrl;
       if (finalPageUrl !== currentUrl) {
         currentUrl = finalPageUrl;
+        if (isMediaSiteUrl(currentUrl)) {
+          return { kind: 'ytdl', finalUrl: currentUrl, resolvedVia: viaChain.join(' → ') };
+        }
         const driveAfter = parseDriveUrl(currentUrl);
         if (driveAfter) continue;
       }
@@ -3013,6 +3032,37 @@ async function verifyDirectLink(url) {
 // TELEGRAM & FORMATTING UTILITIES
 // ============================================================================
 
+async function postTelegramMessage(method, payload, env) {
+  const endpoint = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`;
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  const data = await res.json();
+  if (!data?.ok && payload.reply_markup?.inline_keyboard) {
+    const hasStyle = payload.reply_markup.inline_keyboard.some(row => row.some(b => b && b.style));
+    if (hasStyle) {
+      const cleanPayload = {
+        ...payload,
+        reply_markup: {
+          ...payload.reply_markup,
+          inline_keyboard: payload.reply_markup.inline_keyboard.map(row =>
+            row.map(({ style: _s, ...btn }) => btn)
+          )
+        }
+      };
+      const retryRes = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cleanPayload)
+      });
+      return await retryRes.json();
+    }
+  }
+  return data;
+}
+
 async function sendMessage(chatId, text, env, replyMarkup = null, replyToMsgId = null) {
   const payload = {
     chat_id: chatId,
@@ -3022,13 +3072,7 @@ async function sendMessage(chatId, text, env, replyMarkup = null, replyToMsgId =
   };
   if (replyMarkup) payload.reply_markup = replyMarkup;
   if (replyToMsgId) payload.reply_to_message_id = replyToMsgId;
-
-  const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
-  });
-  return await res.json();
+  return await postTelegramMessage('sendMessage', payload, env);
 }
 
 async function editMessage(chatId, messageId, text, env, replyMarkup = null) {
@@ -3040,13 +3084,7 @@ async function editMessage(chatId, messageId, text, env, replyMarkup = null) {
     disable_web_page_preview: true
   };
   if (replyMarkup) payload.reply_markup = replyMarkup;
-
-  const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/editMessageText`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
-  });
-  return await res.json();
+  return await postTelegramMessage('editMessageText', payload, env);
 }
 
 async function deleteMessage(chatId, messageId, env) {
