@@ -14,11 +14,13 @@ Job item types:
 import base64
 import html
 import http.server
+import importlib
 import json
 import os
 import re
 import shutil
 import signal
+import site
 import subprocess
 import sys
 import threading
@@ -779,20 +781,35 @@ def friendly_ytdl_error(msg: str) -> str:
 
 
 def ensure_ytdl_tools():
+    target_dir = Path("/tmp/ytdl_pkgs")
+    if str(target_dir) not in sys.path:
+        sys.path.insert(0, str(target_dir))
+    user_site = site.getusersitepackages()
+    if user_site and os.path.isdir(user_site):
+        site.addsitedir(user_site)
+    importlib.invalidate_caches()
+
     try:
         import yt_dlp  # noqa: F401
         import mutagen  # noqa: F401
     except ImportError:
+        target_dir.mkdir(parents=True, exist_ok=True)
         pkgs = ["yt-dlp[default]", "mutagen"]
-        rc = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--break-system-packages", "-q", *pkgs],
+        res = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--break-system-packages", "--upgrade", "-q", "--target", str(target_dir), *pkgs],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-        ).returncode
-        if rc != 0:
-            subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-q", *pkgs],
-                check=True,
+        )
+        if res.returncode != 0:
+            res = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--upgrade", "-q", "--target", str(target_dir), *pkgs],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             )
+            if res.returncode != 0:
+                raise RuntimeError(f"Failed to install yt-dlp: {(res.stdout or '').strip()[-400:]}")
+        if user_site and os.path.isdir(user_site):
+            site.addsitedir(user_site)
+        importlib.invalidate_caches()
+        import yt_dlp  # noqa: F401
     if not shutil.which("ffmpeg"):
         subprocess.run(["sudo", "apt-get", "update", "-qq"], check=False)
         subprocess.run(["sudo", "apt-get", "install", "-y", "-qq", "ffmpeg"], check=True)
