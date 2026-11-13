@@ -2927,6 +2927,17 @@ async function resolveAndInspectInput(rawUrl, accessToken) {
       if (blocked) {
         return { kind: 'error', reason: blocked };
       }
+      if (!pageRes.ok) {
+        let host = '';
+        try { host = new URL(currentUrl).hostname.toLowerCase(); } catch {}
+        if (host.endsWith('googleusercontent.com') && (pageRes.status === 400 || pageRes.status === 403 || pageRes.status === 410)) {
+          return {
+            kind: 'error',
+            reason: `Google download server returned HTTP ${pageRes.status} (signed download URLs are IP/session-bound or expired; share the original Drive/source link instead).`
+          };
+        }
+        return { kind: 'error', reason: `Remote server returned HTTP ${pageRes.status}.` };
+      }
     } catch (err) {
       return { kind: 'error', reason: `Failed to inspect page: ${err.message}` };
     }
