@@ -6,7 +6,7 @@ on:
       url:
         description: 'Direct file URL to download & upload to Gofile'
         required: true
-        default: 'https://speedest.telenor.dk/download/10GB.bin'
+        default: 'https://ash-speed.hetzner.com/10GB.bin'
 
 jobs:
   test-gofile:
@@ -19,10 +19,6 @@ jobs:
           echo "--- api.gofile.io/servers ---"
           curl -sS -w "\nHTTP:%{http_code}\n" --max-time 15 https://api.gofile.io/servers | head -c 800
           echo ""
-          echo "--- tiny upload probe ---"
-          echo "probe" > /tmp/probe.txt
-          curl -sS -w "\nHTTP:%{http_code}\n" --max-time 20 -F "file=@/tmp/probe.txt" https://upload.gofile.io/uploadfile
-          echo ""
 
       - name: Install aria2
         run: |
@@ -33,19 +29,20 @@ jobs:
         run: |
           URL="${{ github.event.inputs.url }}"
           echo "Testing URL: $URL"
-          curl -fsSLI --max-time 15 "$URL"
+          curl -fsSL -r 0-0 -D - -o /dev/null --max-time 15 "$URL"
           mkdir -p /tmp/gf_test
-          aria2c -x 16 -s 16 -k 1M --summary-interval=10 -d /tmp/gf_test "$URL"
+          aria2c -x 8 -s 8 -k 1M --continue=true --max-tries=5 --retry-wait=3 --summary-interval=15 -d /tmp/gf_test "$URL"
           ls -lh /tmp/gf_test
           df -h /
 
       - name: Upload File to Gofile
         run: |
           FILE_PATH=$(find /tmp/gf_test -type f | head -n 1)
-          echo "Uploading: $FILE_PATH ($(stat -c%s "$FILE_PATH") bytes)"
+          FILE_SIZE=$(stat -c%s "$FILE_PATH")
+          echo "Uploading: $FILE_PATH ($FILE_SIZE bytes)"
           RESP_FILE=/tmp/gofile_resp.json
           STATS=$(curl -sS -o "$RESP_FILE" -w "HTTP=%{http_code} TIME=%{time_total}s SPEED=%{speed_upload}B/s" \
-            --connect-timeout 20 --max-time 3000 \
+            --connect-timeout 20 --max-time 3500 \
             -F "file=@${FILE_PATH}" \
             "https://upload.gofile.io/uploadfile")
           echo "$STATS"
