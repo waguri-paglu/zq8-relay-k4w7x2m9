@@ -761,6 +761,31 @@ def parse_trim_range(spec: str):
     return start, end
 
 
+def _kill_child_procs():
+    """Terminate direct child processes (e.g., aria2c/ffmpeg) on cancellation."""
+    pid = str(os.getpid())
+    try:
+        subprocess.run(["pkill", "-TERM", "-P", pid], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def _ytdir_written_bytes(yt_dir: Path) -> int:
+    total = 0
+    try:
+        for p in yt_dir.iterdir():
+            if not p.is_file() or p.name.endswith((".aria2", ".ytdl", ".jpg", ".jpeg", ".png", ".webp")):
+                continue
+            st = p.stat()
+            if st.st_blocks > 0:
+                total += min(st.st_size, st.st_blocks * 512)
+            else:
+                total += st.st_size
+    except OSError:
+        pass
+    return total
+
+
 def ytdl_format_spec(quality: str, container: str) -> str:
     if quality in YT_AUDIO_QUALITIES:
         return "ba/b"
@@ -1746,7 +1771,13 @@ class Mirror:
             postprocessors.append({"key": "FFmpegMetadata", "add_chapters": True, "add_metadata": True})
             postprocessors.append({"key": "EmbedThumbnail", "already_have_thumbnail": False})
 
-        state = {"title": self.job.get("detectedName") or "Media", "playlist_title": ""}
+        state = {
+            "title": self.job.get("detectedName") or "Media",
+            "playlist_title": "",
+            "native_tick_at": time.time(),
+            "phase": "Downloading (16x)..",
+            "engine": "yt-dlp + Aria2c",
+        }
 
         def progress_hook(d):
             global cancelled
@@ -1764,6 +1795,7 @@ class Mirror:
 
             st = d.get("status")
             if st == "downloading":
+                state["native_tick_at"] = time.time()
                 done = float(d.get("downloaded_bytes") or 0)
                 total = float(d.get("total_bytes") or d.get("total_bytes_estimate") or 0)
                 spd = float(d.get("speed") or 0)
@@ -1775,6 +1807,8 @@ class Mirror:
                     cancelled = True
                     raise DownloadCancelled("Cancelled by user")
             elif st == "finished":
+                state["native_tick_at"] = time.time()
+                state["phase"] = "Processing.."
                 total = float(d.get("total_bytes") or d.get("downloaded_bytes") or 0)
                 try:
                     self.tick(disp, "Processing..", 99.0, total, total, 0, None, "yt-dlp + FFmpeg", force=True)
@@ -1786,53 +1820,134 @@ class Mirror:
             global cancelled
             if cancelled:
                 raise DownloadCancelled("Cancelled by user")
-            if d.get("status") == "started":
+            st = d.get("status")
+            if st == "started":
+                state["native_tick_at"] = time.time()
+                state["phase"] = "Merging (FFmpeg).."
+                state["engine"] = "yt-dlp + FFmpeg"
                 try:
                     self.tick(state["title"], "Merging (FFmpeg)..", 99.5, 0, 0, 0, None, "yt-dlp + FFmpeg", force=True)
                 except InterruptedError:
                     cancelled = True
                     raise DownloadCancelled("Cancelled by user")
+            elif st == "finished":
+                state["native_tick_at"] = time.time()
+                state["phase"] = "Downloading (16x).." if can_aria else "Downloading.."
+                state["engine"] = "yt-dlp + Aria2c" if can_aria else "yt-dlp + FFmpeg"
 
-        ydl_opts = {
-            "format": ytdl_format_spec(quality, container),
-            "outtmpl": str(yt_dir / "%(title).150B [%(id)s].%(ext)s"),
-            "restrictfilenames": False,
-            "noplaylist": (pl_mode != "all"),
-            "ignoreerrors": (pl_mode == "all"),
-            "writethumbnail": use_meta,
-            "postprocessors": postprocessors,
-            "progress_hooks": [progress_hook],
-            "postprocessor_hooks": [post_hook],
-            "quiet": True,
-            "no_warnings": True,
-            "noprogress": True,
-        }
-        if shutil.which("node"):
-            ydl_opts["js_runtimes"] = {"node": {}}
-        if not is_audio and container in ("mp4", "mkv"):
-            ydl_opts["merge_output_format"] = container
-        if use_subs:
-            ydl_opts["writesubtitles"] = True
-            ydl_opts["writeautomaticsub"] = True
-            ydl_opts["subtitleslangs"] = [s.strip() for s in sub_lang.split(",") if s.strip()] or ["en"]
-            ydl_opts["subtitlesformat"] = "srt/best"
-        if pl_mode == "all" and pl_items:
-            ydl_opts["playlist_items"] = pl_items
-        if trim_spec:
-            rng = parse_trim_range(trim_spec)
-            if rng:
-                ydl_opts["download_ranges"] = download_range_func(None, [rng])
-                ydl_opts["force_keyframes_at_cuts"] = True
+        def build_ydl_opts(use_aria: bool) -> dict:
+            opts = {
+                "format": ytdl_format_spec(quality, container),
+                "outtmpl": str(yt_dir / "%(title).150B [%(id)s].%(ext)s"),
+                "restrictfilenames": False,
+                "noplaylist": (pl_mode != "all"),
+                "ignoreerrors": (pl_mode == "all"),
+                "writethumbnail": use_meta,
+                "postprocessors": postprocessors,
+                "progress_hooks": [progress_hook],
+                "postprocessor_hooks": [post_hook],
+                "concurrent_fragment_downloads": 16,
+                "http_chunk_size": 10 * 1024 * 1024,
+                "buffersize": 1024 * 1024,
+                "retries": 10,
+                "fragment_retries": 10,
+                "quiet": True,
+                "no_warnings": True,
+                "noprogress": True,
+            }
+            if use_aria:
+                opts["external_downloader"] = {"http": "aria2c", "https": "aria2c"}
+                opts["external_downloader_args"] = {
+                    "aria2c": [
+                        "-x", "16", "-s", "16", "-k", "1M",
+                        "--file-allocation=none",
+                        "--max-tries=5", "--retry-wait=2",
+                        "--connect-timeout=15", "--timeout=30",
+                        "--summary-interval=0",
+                    ]
+                }
+            if shutil.which("node"):
+                opts["js_runtimes"] = {"node": {}}
+            if not is_audio and container in ("mp4", "mkv"):
+                opts["merge_output_format"] = container
+            if use_subs:
+                opts["writesubtitles"] = True
+                opts["writeautomaticsub"] = True
+                opts["subtitleslangs"] = [s.strip() for s in sub_lang.split(",") if s.strip()] or ["en"]
+                opts["subtitlesformat"] = "srt/best"
+            if pl_mode == "all" and pl_items:
+                opts["playlist_items"] = pl_items
+            if trim_spec:
+                rng = parse_trim_range(trim_spec)
+                if rng:
+                    opts["download_ranges"] = download_range_func(None, [rng])
+                    opts["force_keyframes_at_cuts"] = True
+            return opts
 
+        can_aria = bool(shutil.which("aria2c")) and not trim_spec
         cookie_path = prepare_ytdl_cookiefile()
-        if cookie_path:
-            ydl_opts["cookiefile"] = str(cookie_path)
+
+        def run_ydl(use_aria: bool):
+            global cancelled
+            opts = build_ydl_opts(use_aria)
+            if cookie_path:
+                opts["cookiefile"] = str(cookie_path)
+            state["engine"] = "yt-dlp + Aria2c" if use_aria else "yt-dlp + FFmpeg"
+            state["phase"] = "Downloading (16x).." if use_aria else "Downloading.."
+
+            stop_mon = threading.Event()
+
+            def monitor():
+                global cancelled
+                prev_bytes = _ytdir_written_bytes(yt_dir)
+                prev_t = time.time()
+                while not stop_mon.wait(1.0):
+                    if cancelled:
+                        _kill_child_procs()
+                        break
+                    now = time.time()
+                    if now - state["native_tick_at"] < 3.0:
+                        prev_bytes = _ytdir_written_bytes(yt_dir)
+                        prev_t = now
+                        continue
+                    cur_bytes = _ytdir_written_bytes(yt_dir)
+                    dt = max(0.001, now - prev_t)
+                    spd = max(0.0, (cur_bytes - prev_bytes) / dt)
+                    prev_bytes = cur_bytes
+                    prev_t = now
+                    try:
+                        self.tick(state["title"], state["phase"], 0.0, cur_bytes, 0, spd, None, state["engine"])
+                    except InterruptedError:
+                        cancelled = True
+                        _kill_child_procs()
+                        break
+
+            mon_thread = threading.Thread(target=monitor, daemon=True)
+            mon_thread.start()
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    if isinstance(info, dict):
+                        state["playlist_title"] = info.get("title") or ""
+            finally:
+                stop_mon.set()
+                mon_thread.join(timeout=2)
 
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                if isinstance(info, dict):
-                    state["playlist_title"] = info.get("title") or ""
+            try:
+                run_ydl(can_aria)
+            except DownloadCancelled:
+                raise
+            except Exception:
+                if cancelled or not can_aria:
+                    raise
+                # Aria2c failed (e.g. strict CDN/TLS check); clean partial artifacts and fall back to tuned native yt-dlp
+                for p in list(yt_dir.iterdir()):
+                    if p.is_file() and p.name.endswith((".aria2", ".part", ".temp")):
+                        p.unlink(missing_ok=True)
+                state["native_tick_at"] = time.time()
+                self.tick(state["title"], "Retrying (Native)..", 0.0, 0, 0, 0, None, "yt-dlp + FFmpeg", force=True)
+                run_ydl(False)
         except DownloadCancelled:
             raise InterruptedError("Cancelled by user")
         except Exception as e:
