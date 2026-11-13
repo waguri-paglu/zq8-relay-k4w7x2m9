@@ -32,6 +32,7 @@ jobs:
           WORKER_URL: https://telegram-gdrive-bot.yashdaive.workers.dev
           JOB_SECRET: ${{ secrets.JOB_SECRET }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          YTDL_COOKIES: ${{ secrets.YTDL_COOKIES }}
           GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
           python3 runner/mirror_runner.py

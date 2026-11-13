@@ -36,6 +36,7 @@ JOB_SECRET = os.environ.get("JOB_SECRET", "")
 JOB_ID = os.environ.get("JOB_ID", "")
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 GITHUB_RUN_ID = os.environ.get("GITHUB_RUN_ID", "")
+YTDL_COOKIES = os.environ.get("YTDL_COOKIES", "")
 
 REPO_URL = "https://github.com/waguri-paglu/zq8-relay-k4w7x2m9"
 
@@ -768,9 +769,11 @@ def ytdl_format_spec(quality: str, container: str) -> str:
 def friendly_ytdl_error(msg: str) -> str:
     low = (msg or "").lower()
     if "age" in low and ("confirm" in low or "restrict" in low or "sign in" in low):
-        return "This video is age-restricted and requires authentication."
+        return "This video is age-restricted and requires valid YTDL_COOKIES."
     if "sign in to confirm" in low or "not a bot" in low or "cookies" in low or "login required" in low:
-        return "Site requested anti-bot verification or sign-in cookies (runner IP flagged)."
+        if (YTDL_COOKIES or "").strip():
+            return "Cookies rejected or expired — refresh the YTDL_COOKIES GitHub secret."
+        return "Site requested anti-bot verification or sign-in cookies (add YTDL_COOKIES GitHub secret)."
     if "private video" in low:
         return "This video is private."
     if "video unavailable" in low or "unavailable" in low:
@@ -778,6 +781,66 @@ def friendly_ytdl_error(msg: str) -> str:
     if "geo" in low and "restrict" in low:
         return "This video is geo-restricted in the runner region."
     return msg
+
+
+def _json_cookies_to_netscape(items: list) -> str:
+    lines = ["# Netscape HTTP Cookie File"]
+    for c in items:
+        if not isinstance(c, dict) or not c.get("domain") or not c.get("name"):
+            continue
+        domain = str(c["domain"])
+        inc_sub = "TRUE" if domain.startswith(".") else "FALSE"
+        path = str(c.get("path") or "/")
+        secure = "TRUE" if c.get("secure") else "FALSE"
+        exp_raw = c.get("expirationDate") or c.get("expiry") or 0
+        try:
+            exp = str(int(float(exp_raw))) if exp_raw else "0"
+        except (TypeError, ValueError):
+            exp = "0"
+        val = str(c.get("value") or "")
+        lines.append("\t".join([domain, inc_sub, path, secure, exp, str(c["name"]), val]))
+    return "\n".join(lines) + "\n"
+
+
+def prepare_ytdl_cookiefile(raw_cookies: str = None):
+    raw = (YTDL_COOKIES if raw_cookies is None else raw_cookies) or ""
+    text = raw.strip()
+    if not text:
+        return None
+
+    # Allow single-line base64-encoded cookies.txt so mobile copy/paste never strips tabs/newlines
+    if "\n" not in text and "\t" not in text and not text.startswith("[") and not text.startswith("#"):
+        try:
+            decoded = base64.b64decode(text, validate=True).decode("utf-8", "ignore").strip()
+            if "\t" in decoded or decoded.startswith("#") or decoded.startswith("["):
+                text = decoded
+        except Exception:
+            pass
+
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                text = _json_cookies_to_netscape(parsed)
+        except Exception:
+            pass
+
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if not text.lstrip().startswith("#"):
+        text = "# Netscape HTTP Cookie File\n" + text
+    if not text.endswith("\n"):
+        text += "\n"
+
+    for line in text.splitlines():
+        s = line.strip()
+        if s and not s.startswith("#"):
+            mask_secret(s, min_len=8)
+
+    WORK_DIR.mkdir(parents=True, exist_ok=True)
+    cookie_path = WORK_DIR / f"ytdl_cookies_{JOB_ID or 'run'}.txt"
+    cookie_path.write_text(text, encoding="utf-8")
+    os.chmod(cookie_path, 0o600)
+    return cookie_path
 
 
 def ensure_ytdl_tools():
@@ -1572,6 +1635,10 @@ class Mirror:
                 ydl_opts["download_ranges"] = download_range_func(None, [rng])
                 ydl_opts["force_keyframes_at_cuts"] = True
 
+        cookie_path = prepare_ytdl_cookiefile()
+        if cookie_path:
+            ydl_opts["cookiefile"] = str(cookie_path)
+
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
@@ -1583,6 +1650,9 @@ class Mirror:
             if cancelled:
                 raise InterruptedError("Cancelled by user")
             raise RuntimeError(friendly_ytdl_error(str(e)))
+        finally:
+            if cookie_path:
+                cookie_path.unlink(missing_ok=True)
 
         if cancelled:
             raise InterruptedError("Cancelled by user")
