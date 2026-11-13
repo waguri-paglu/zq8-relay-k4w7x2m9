@@ -781,14 +781,16 @@ def friendly_ytdl_error(msg: str) -> str:
 def ensure_ytdl_tools():
     try:
         import yt_dlp  # noqa: F401
+        import mutagen  # noqa: F401
     except ImportError:
+        pkgs = ["yt-dlp[default]", "mutagen"]
         rc = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--break-system-packages", "-q", "yt-dlp"],
+            [sys.executable, "-m", "pip", "install", "--break-system-packages", "-q", *pkgs],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         ).returncode
         if rc != 0:
             subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-q", "yt-dlp"],
+                [sys.executable, "-m", "pip", "install", "-q", *pkgs],
                 check=True,
             )
     if not shutil.which("ffmpeg"):
@@ -1536,6 +1538,8 @@ class Mirror:
             "no_warnings": True,
             "noprogress": True,
         }
+        if shutil.which("node"):
+            ydl_opts["js_runtimes"] = {"node": {}}
         if not is_audio and container in ("mp4", "mkv"):
             ydl_opts["merge_output_format"] = container
         if use_subs:
